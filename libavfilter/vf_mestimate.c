@@ -50,13 +50,13 @@ typedef struct MEContext {
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
-static const AVOption mestf_options[] = {
+static const AVOption mestimate_options[] = {
     { "block", "specify the block size", OFFSET(block_size), AV_OPT_TYPE_INT, {.i64=8}, 4, 32, FLAGS, "block" },
     { "search",  "specify seach region", OFFSET(reg_size), AV_OPT_TYPE_INT, {.i64=7}, 4, 32, FLAGS, "search" },
     { NULL }
 };
 
-AVFILTER_DEFINE_CLASS(mestf);
+AVFILTER_DEFINE_CLASS(mestimate);
 
 static int query_formats(AVFilterContext *ctx)
 {
@@ -154,18 +154,16 @@ static AVMotionVector *get_motion_vector(AVFilterLink *inlink, int x_cur, int y_
             if (x_sb < 0 || x_sb > x_sb_max)
                 continue;
 
-            mse = get_mse(s, x_cur, y_cur, x_sb, y_sb);
-            if (mse_min == -1 || mse < mse_min) {
-
+            
+            if (mse_min == -1 || (mse = get_mse(s, x_cur, y_cur, x_sb, y_sb)) < mse_min) {
                 mse_min = mse;
                 dx = x_sb - x_cur;
                 dy = y_sb - y_cur;
-
             }
         }
     }
 
-    add_mv_data(mv, s->block_size, x_cur + dx, y_cur + dy, x_cur, y_cur, 0);
+    add_mv_data(mv, s->block_size, x_cur + dx, y_cur + dy, x_cur, y_cur, -1);
 
     return mv;
 }
@@ -195,10 +193,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         for (x = 0; x < s->linesize[0]; x+= s->block_size) {
             AVMotionVector *mv = get_motion_vector(inlink, x, y);
 
-            add_mv_data(mvs + mv_count, s->block_size, mv->dst_x, mv->dst_y, mv->src_x, mv->src_y, mv->source);
-            av_freep(&mv);
+            if (mv->dst_x - mv->src_x != 0 || mv->dst_y - mv->src_y != 0)
+                add_mv_data(mvs + mv_count++, s->block_size, mv->dst_x, mv->dst_y, mv->src_x, mv->src_y, mv->source);
 
-            mv_count++;
+            av_freep(&mv);
         }
     }
 
@@ -226,7 +224,7 @@ static av_cold void uninit(AVFilterContext *ctx)
 
 }
 
-static const AVFilterPad mestf_inputs[] = {
+static const AVFilterPad mestimate_inputs[] = {
     {
         .name          = "default",
         .type          = AVMEDIA_TYPE_VIDEO,
@@ -236,7 +234,7 @@ static const AVFilterPad mestf_inputs[] = {
     { NULL }
 };
 
-static const AVFilterPad mestf_outputs[] = {
+static const AVFilterPad mestimate_outputs[] = {
     {
         .name          = "default",
         .type          = AVMEDIA_TYPE_VIDEO,
@@ -244,14 +242,14 @@ static const AVFilterPad mestf_outputs[] = {
     { NULL }
 };
 
-AVFilter ff_vf_mestf = {
-    .name          = "mestf",
+AVFilter ff_vf_mestimate = {
+    .name          = "mestimate",
     .description   = NULL_IF_CONFIG_SMALL("Generates motion vectors."),
     .priv_size     = sizeof(MEContext),
-    .priv_class    = &mestf_class,
+    .priv_class    = &mestimate_class,
     .uninit        = uninit,
     .query_formats = query_formats,
-    .inputs        = mestf_inputs,
-    .outputs       = mestf_outputs,
+    .inputs        = mestimate_inputs,
+    .outputs       = mestimate_outputs,
     .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL
 };
