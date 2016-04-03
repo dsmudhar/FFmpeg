@@ -1,8 +1,8 @@
 /**
- * 
+ *
  * Developed by Davinder Singh (DSM_ / @dsmudhar) during GSoC 2016
  * As qualification task: Basic but working motion estimation filter
- * 
+ *
  * Used vf_w3fdif.c as base, needed two frames for bi-directional prediction.
  *
  * The filter uses block matching exhaustive search algorithm
@@ -97,7 +97,7 @@ static int64_t get_mse(MEContext *s, int width, int x_cur, int y_cur, int x_sb, 
     uint8_t *buf_cur = s->cur->data[0];
     int64_t mse = 0;
     int i, j;
-    
+
     for (i = 0; i < s->block_size; i++)
         for (j = 0; j < s->block_size; j++) {
             int64_t sb = ((int64_t) y_sb + i) * width + x_sb + j;
@@ -105,7 +105,7 @@ static int64_t get_mse(MEContext *s, int width, int x_cur, int y_cur, int x_sb, 
             int diff = (int) buf_src[sb] - (int) buf_cur[cur];
             mse += pow(diff, 2);
         }
-    
+
     return mse / pow(s->block_size, 2);
 }
 
@@ -145,7 +145,7 @@ static void get_motion_vector(AVFilterLink *inlink, int x_cur, int y_cur, int so
 
             if (x_sb < 0 || x_sb > x_sb_max)
                 continue;
-            
+
             if (mse_min == -1 || (mse = get_mse(s, inlink->w, x_cur, y_cur, x_sb, y_sb, source)) < mse_min) {
                 mse_min = mse;
                 dx = x_sb - x_cur;
@@ -176,7 +176,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             for (x = 0; x < inlink->w; x+= s->block_size)
                 for (i = 0; i < 2; i++)
                     get_motion_vector(inlink, x, y, i == 0 ? -1 : 1);
-    } else { // no vectors will be generated if cloned, so skipping for first frame (s->prev, s->next are null) 
+    } else { // no vectors will be generated if cloned, so skipping for first frame (s->prev, s->next are null)
         s->cur = av_frame_clone(s->next);
         if (!s->cur)
             return AVERROR(ENOMEM);
@@ -192,9 +192,9 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
             return AVERROR(ENOMEM);
         memcpy(sd->data, s->mvs, s->mv_count * sizeof(AVMotionVector));
     }
-    
+
     return ff_filter_frame(ctx->outputs[0], out);
-} 
+}
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
