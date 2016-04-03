@@ -204,7 +204,6 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_frame_free(&s->cur );
     av_frame_free(&s->next);
     av_freep(&s->mvs);
-
 }
 
 static const AVFilterPad mestimate_inputs[] = {
@@ -234,5 +233,4 @@ AVFilter ff_vf_mestimate = {
     .query_formats = query_formats,
     .inputs        = mestimate_inputs,
     .outputs       = mestimate_outputs,
-    .flags         = AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL
 };
