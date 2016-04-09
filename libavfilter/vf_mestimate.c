@@ -39,8 +39,9 @@ typedef struct MEContext {
     AVMotionVector *mvs; ///< motion vectors
     AVFrame *prev, *cur, *next;  ///< previous, current, next frames
     int block_size; ///< block size
-    int reg_size; ///< search region
+    int reg_size; ///< search parameter
     int32_t mv_count; ///< no of motion vectors per frame
+    int step; ///< step for movement of reference block in search area
 
 } MEContext;
 
@@ -49,8 +50,9 @@ typedef struct MEContext {
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption mestimate_options[] = {
-    { "block", "specify the block size", OFFSET(block_size), AV_OPT_TYPE_INT, {.i64=8}, 4, 32, FLAGS, "block" },
-    { "search",  "specify search region", OFFSET(reg_size), AV_OPT_TYPE_INT, {.i64=7}, 4, 32, FLAGS, "search" },
+    { "block", "specify the macroblock size", OFFSET(block_size), AV_OPT_TYPE_INT, {.i64=16}, 4, INT_MAX, FLAGS, "block" },
+    { "search",  "specify the search parameter", OFFSET(reg_size), AV_OPT_TYPE_INT, {.i64=7}, 4, INT_MAX, FLAGS, "search" },
+    { "step",  "specify step for movement of reference block in search area", OFFSET(step), AV_OPT_TYPE_INT, {.i64=1}, 1, INT_MAX, FLAGS, "step" },
     { NULL }
 };
 
@@ -90,28 +92,31 @@ static int config_input(AVFilterLink *inlink)
     return 0;
 }
 
-static int64_t get_mse(MEContext *s, int width, int x_cur, int y_cur, int x_sb, int y_sb, int source)
+static int64_t get_mad(MEContext *s, int x_cur, int y_cur, int x_sb, int y_sb, int direction)
 {
-    // source == -1 means forward prediction => frame k - 1 as reference
-    uint8_t *buf_src = source == -1 ? s->prev->data[0] : s->next->data[0];
+    // dir = 0 => source = -1 => forward prediction  => frame k - 1 as reference
+    // dir = 1 => source = +1 => backward prediction => frame k + 1 as reference
+    uint8_t *buf_ref = (direction ? s->next : s->prev)->data[0];
     uint8_t *buf_cur = s->cur->data[0];
-    int64_t mse = 0;
-    int i, j;
+    int stride_ref = (direction ? s->next : s->prev)->linesize[0];
+    int stride_cur = s->cur->linesize[0];
+    int64_t mad = 0;
+    int x, y;
 
-    for (i = 0; i < s->block_size; i++)
-        for (j = 0; j < s->block_size; j++) {
-            int64_t sb = ((int64_t) y_sb + i) * width + x_sb + j;
-            int64_t cur = ((int64_t) y_cur + i) * width + x_cur + j;
-            int diff = (int) buf_src[sb] - (int) buf_cur[cur];
-            mse += pow(diff, 2);
+    buf_ref += y_sb * stride_ref;
+    buf_cur += y_cur * stride_cur;
+
+    for (y = 0; y < s->block_size; y++)
+        for (x = 0; x < s->block_size; x++) {
+            int diff = buf_ref[y * stride_ref + x + x_sb] - buf_cur[y * stride_cur + x + x_cur];
+            mad += FFABS(diff);
         }
 
-    return mse / pow(s->block_size, 2);
+    return mad;
 }
 
 static void add_mv_data(AVMotionVector *mv, int block_size,
-                  int dst_x, int dst_y, int src_x, int src_y,
-                  int source)
+                        int dst_x, int dst_y, int src_x, int src_y, int direction)
 {
     mv->w = block_size;
     mv->h = block_size;
@@ -119,43 +124,46 @@ static void add_mv_data(AVMotionVector *mv, int block_size,
     mv->dst_y = dst_y;
     mv->src_x = src_x;
     mv->src_y = src_y;
-    mv->source = source;
+    mv->source = direction ? 1 : -1;
     mv->flags = 0;
 }
 
-static void get_motion_vector(AVFilterLink *inlink, int x_cur, int y_cur, int source)
+static void get_motion_vector(AVFilterLink *inlink, int x_cur, int y_cur, int dir)
 {
     AVFilterContext *ctx = inlink->dst;
     MEContext *s = ctx->priv;
 
     int i, j, x_sb, y_sb, dx = 0, dy = 0;
     int sign_i = 1, sign_j = 1;
-    int y_sb_max = av_clip(y_cur + s->reg_size, 0, inlink->h - 1);
-    int x_sb_max = av_clip(x_cur + s->reg_size, 0, inlink->w - 1);
-    int64_t mse, mse_min = -1;
+    int y_sb_max = av_clip(y_cur + s->reg_size, 0, inlink->h - s->block_size - 1);
+    int x_sb_max = av_clip(x_cur + s->reg_size, 0, inlink->w - s->block_size - 1);
+    int64_t mad, mad_min = INT64_MAX;
 
-    for (i = 0; i < s->reg_size; i = sign_i ? -(i + 1) : -i, sign_i = !sign_i) {
+    for (i = 0; i <= s->reg_size; i = sign_i ? -(i - s->step) : -i, sign_i = !sign_i) {
         y_sb = y_cur + i;
 
         if (y_sb < 0 || y_sb > y_sb_max)
             continue;
 
-        for (j = 0; j < s->reg_size; j = sign_j ? -(j + 1) : -j, sign_j = !sign_j) {
+        for (j = 0; j <= s->reg_size; j = sign_j ? -(j - s->step) : -j, sign_j = !sign_j) {
             x_sb = x_cur + j;
 
             if (x_sb < 0 || x_sb > x_sb_max)
                 continue;
 
-            if (mse_min == -1 || (mse = get_mse(s, inlink->w, x_cur, y_cur, x_sb, y_sb, source)) < mse_min) {
-                mse_min = mse;
-                dx = x_sb - x_cur;
-                dy = y_sb - y_cur;
+            if ((mad = get_mad(s, x_cur, y_cur, x_sb, y_sb, dir)) < mad_min) {
+                mad_min = mad;
+                dx = x_cur - x_sb;
+                dy = y_cur - y_sb;
             }
         }
     }
 
-    if (dx != 0 || dy != 0)
-        add_mv_data(s->mvs + s->mv_count++, s->block_size, x_cur + dx, y_cur + dy, x_cur, y_cur, source);
+    if (dx || dy) {
+        x_cur += s->block_size / 2;
+        y_cur += s->block_size / 2;
+        add_mv_data(s->mvs + s->mv_count++, s->block_size, x_cur + dx, y_cur + dy, x_cur, y_cur, dir);
+    }
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
@@ -163,7 +171,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVFilterContext *ctx = inlink->dst;
     MEContext *s = ctx->priv;
     AVFrameSideData *sd;
-    int i, x, y;
+    int x, y, dir;
 
     av_frame_free(&s->prev);
     s->mv_count = 0;
@@ -174,8 +182,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     if (s->cur) {
         for (y = 0; y < inlink->h; y += s->block_size)
             for (x = 0; x < inlink->w; x+= s->block_size)
-                for (i = 0; i < 2; i++)
-                    get_motion_vector(inlink, x, y, i == 0 ? -1 : 1);
+                for (dir = 0; dir < 2; dir++)
+                    get_motion_vector(inlink, x, y, dir);
     } else { // no vectors will be generated if cloned, so skipping for first frame (s->prev, s->next are null)
         s->cur = av_frame_clone(s->next);
         if (!s->cur)
@@ -185,6 +193,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVFrame *out = av_frame_clone(s->cur);
     if (!out)
         return AVERROR(ENOMEM);
+    out->pts = s->next->pts;
 
     if (s->mv_count) {
         sd = av_frame_new_side_data(out, AV_FRAME_DATA_MOTION_VECTORS, s->mv_count * sizeof(AVMotionVector));
