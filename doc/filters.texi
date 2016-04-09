@@ -8779,6 +8779,15 @@ Estimates the motion and generates motion vectors using block matching algorithm
 
 This filter accepts the following options:
 @table @option
+@item algo
+Set the algorithm to be used. Accepts one of the following values:
+
+@table @samp
+@item ebma
+Exhaustive block matching algorithm.
+@end table
+Default value is @samp{ebma}.
+
 @item block
 Set macroblock size. Default is @code{16}.
 

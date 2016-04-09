@@ -38,6 +38,7 @@ typedef struct MEContext {
     const AVClass *class;
     AVMotionVector *mvs; ///< motion vectors
     AVFrame *prev, *cur, *next;  ///< previous, current, next frames
+    int algo;
     int block_size; ///< block size
     int reg_size; ///< search parameter
     int32_t mv_count; ///< no of motion vectors per frame
@@ -50,8 +51,10 @@ typedef struct MEContext {
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption mestimate_options[] = {
-    { "block", "specify the macroblock size", OFFSET(block_size), AV_OPT_TYPE_INT, {.i64=16}, 4, INT_MAX, FLAGS, "block" },
-    { "search",  "specify the search parameter", OFFSET(reg_size), AV_OPT_TYPE_INT, {.i64=7}, 4, INT_MAX, FLAGS, "search" },
+    { "algo", "specify search algorithm", OFFSET(algo), AV_OPT_TYPE_INT, {.i64=0}, 0, 0, FLAGS, "algo" },
+    CONST("ebma",  "exhaustive block matching algorithm", 0, "algo"),
+    { "block", "specify macroblock size", OFFSET(block_size), AV_OPT_TYPE_INT, {.i64=16}, 4, INT_MAX, FLAGS, "block" },
+    { "search",  "specify search parameter", OFFSET(reg_size), AV_OPT_TYPE_INT, {.i64=7}, 4, INT_MAX, FLAGS, "search" },
     { "step",  "specify step for movement of reference block in search area", OFFSET(step), AV_OPT_TYPE_INT, {.i64=1}, 1, INT_MAX, FLAGS, "step" },
     { NULL }
 };
@@ -92,7 +95,7 @@ static int config_input(AVFilterLink *inlink)
     return 0;
 }
 
-static int64_t get_mad(MEContext *s, int x_cur, int y_cur, int x_sb, int y_sb, int direction)
+static uint64_t get_mad(MEContext *s, int x_cur, int y_cur, int x_sb, int y_sb, int direction)
 {
     // dir = 0 => source = -1 => forward prediction  => frame k - 1 as reference
     // dir = 1 => source = +1 => backward prediction => frame k + 1 as reference
@@ -128,24 +131,33 @@ static void add_mv_data(AVMotionVector *mv, int block_size,
     mv->flags = 0;
 }
 
+static void min_vector(int *dx, int *dy, int dx_new, int dy_new) {
+    if (dx_new * dx_new + dy_new * dy_new < *dx * *dx + *dy * *dy) {
+        *dx = dx_new;
+        *dy = dy_new;
+    }
+}
+
 static void get_motion_vector(AVFilterLink *inlink, int x_cur, int y_cur, int dir)
 {
     AVFilterContext *ctx = inlink->dst;
     MEContext *s = ctx->priv;
 
     int i, j, x_sb, y_sb, dx = 0, dy = 0;
-    int sign_i = 1, sign_j = 1;
     int y_sb_max = av_clip(y_cur + s->reg_size, 0, inlink->h - s->block_size - 1);
     int x_sb_max = av_clip(x_cur + s->reg_size, 0, inlink->w - s->block_size - 1);
-    int64_t mad, mad_min = INT64_MAX;
+    uint64_t mad, mad_min;
 
-    for (i = 0; i <= s->reg_size; i = sign_i ? -(i - s->step) : -i, sign_i = !sign_i) {
+    if (!(mad_min = get_mad(s, x_cur, y_cur, x_cur, y_cur, dir)))
+        return;
+
+    for (i = -s->reg_size; i <= s->reg_size; i++) {
         y_sb = y_cur + i;
 
         if (y_sb < 0 || y_sb > y_sb_max)
             continue;
 
-        for (j = 0; j <= s->reg_size; j = sign_j ? -(j - s->step) : -j, sign_j = !sign_j) {
+        for (j = -s->reg_size; j <= s->reg_size; j++) {
             x_sb = x_cur + j;
 
             if (x_sb < 0 || x_sb > x_sb_max)
@@ -155,13 +167,14 @@ static void get_motion_vector(AVFilterLink *inlink, int x_cur, int y_cur, int di
                 mad_min = mad;
                 dx = x_cur - x_sb;
                 dy = y_cur - y_sb;
-            }
+            } else if (mad == mad_min)
+                min_vector(&dx, &dy, x_cur - x_sb, y_cur - y_sb);
         }
     }
 
     if (dx || dy) {
-        x_cur += s->block_size / 2;
-        y_cur += s->block_size / 2;
+        x_cur += s->block_size >> 1;
+        y_cur += s->block_size >> 1;
         add_mv_data(s->mvs + s->mv_count++, s->block_size, x_cur + dx, y_cur + dy, x_cur, y_cur, dir);
     }
 }
@@ -235,7 +248,7 @@ static const AVFilterPad mestimate_outputs[] = {
 
 AVFilter ff_vf_mestimate = {
     .name          = "mestimate",
-    .description   = NULL_IF_CONFIG_SMALL("Generates motion vectors."),
+    .description   = NULL_IF_CONFIG_SMALL("Generate motion vectors."),
     .priv_size     = sizeof(MEContext),
     .priv_class    = &mestimate_class,
     .uninit        = uninit,
