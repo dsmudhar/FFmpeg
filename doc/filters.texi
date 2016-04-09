@@ -8773,6 +8773,22 @@ format=rgb24,mergeplanes=0x000102:yuv444p
 @end example
 @end itemize
 
+@section mestimate
+
+Estimates the motion and generates motion vectors using block matching algorithm.
+
+This filter accepts the following options:
+@table @option
+@item block
+Set macroblock size. Default is @code{16}.
+
+@item search
+Set search parameter. Default is @code{7}.
+
+@item step
+Set step for movement of reference macroblock in search area. Default is @code{1}.
+@end table
+
 @section metadata, ametadata
 
 Manipulate frame metadata.
