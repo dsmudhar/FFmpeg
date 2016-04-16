@@ -151,13 +151,13 @@ static void get_motion_vector(AVFilterLink *inlink, int x_cur, int y_cur, int di
     if (!(mad_min = get_mad(s, x_cur, y_cur, x_cur, y_cur, dir)))
         return;
 
-    for (i = -s->reg_size; i <= s->reg_size; i++) {
+    for (i = -s->reg_size; i <= s->reg_size; i += s->step) {
         y_sb = y_cur + i;
 
         if (y_sb < 0 || y_sb > y_sb_max)
             continue;
 
-        for (j = -s->reg_size; j <= s->reg_size; j++) {
+        for (j = -s->reg_size; j <= s->reg_size; j += s->step) {
             x_sb = x_cur + j;
 
             if (x_sb < 0 || x_sb > x_sb_max)
