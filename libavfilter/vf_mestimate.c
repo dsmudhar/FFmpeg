@@ -58,7 +58,7 @@ typedef struct MEContext {
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption mestimate_options[] = {
-    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = ME_METHOD_ESA}, ME_METHOD_ESA, /*TODO*/INT_MAX, FLAGS, "method" },
+    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = ME_METHOD_ESA}, ME_METHOD_DIA, /*TODO*/INT_MAX, FLAGS, "method" },
         CONST("esa", "exhaustive search", 0, "method"),
         //TODO add other me method options
     { "mb_size", "specify macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 2, INT_MAX, FLAGS },
@@ -151,7 +151,7 @@ static void search_mv_esa(AVFilterLink *inlink, int x_cur, int y_cur, int *dx, i
         return;
     }
 
-    for (y = start_y; y < end_y; y++) {
+    for (y = start_y; y < end_y; y++)
         for (x = start_x; x < end_x; x++) {
             if ((cost = get_mad(s, x_cur, y_cur, x, y, dir)) < cost_min) {
                 cost_min = cost;
@@ -160,7 +160,6 @@ static void search_mv_esa(AVFilterLink *inlink, int x_cur, int y_cur, int *dx, i
             } else if (cost == cost_min)
                 MIN_VECTOR(*dx, *dy, x - x_cur, y - y_cur);
         }
-    }
 }
 
 static void search_mv_tss(AVFilterLink *inlink, int x_cur, int y_cur, int *dx, int *dy, int dir)
@@ -379,7 +378,7 @@ static void search_mv_tdls(AVFilterLink *inlink, int x_cur, int y_cur, int *dx, 
             }
         }
 
-        if (y_min_cost == y_orig || FFABS(y_min_cost - y_cur) >= s->search_param) { // if current origin
+        if (y_min_cost == y_orig || FFABS(y_min_cost - y_cur) >= s->search_param) { //FIXME
             step = step / 2;
         } else {
             x_orig = x_min_cost;
@@ -399,7 +398,7 @@ static void search_mv_fss(AVFilterLink *inlink, int x_cur, int y_cur, int *dx, i
     int x, y;
     int x_orig = x_cur, y_orig = y_cur;
     int start_x, start_y, end_x, end_y;
-    int step = 2; // fixed step
+    int step = 2;
     int x_min_cost = x_orig, y_min_cost = y_orig;
     uint64_t cost, cost_min;
 
@@ -470,10 +469,74 @@ static void search_mv_fss(AVFilterLink *inlink, int x_cur, int y_cur, int *dx, i
                 }
 
                 if (x_min_cost == x_orig && y_min_cost == y_orig ||
-                    FFABS(x_min_cost - x_orig) > s->search_param - 1 || FFABS(y_min_cost - y_orig) > s->search_param - 1)
+                    FFABS(x_min_cost - x_cur) >= s->search_param - 1 || FFABS(y_min_cost - y_cur) >= s->search_param - 1)
                     step = 1;
 
             } while (step > 1);
+        }
+
+    } while (step > 0);
+
+    *dx = x_min_cost - x_cur;
+    *dy = y_min_cost - y_cur;
+}
+
+static void search_mv_dia(AVFilterLink *inlink, int x_cur, int y_cur, int *dx, int *dy, int dir)
+{
+    MEContext *s = inlink->dst->priv;
+
+    int x, y;
+    int x_orig = x_cur, y_orig = y_cur;
+    int start_x, start_y, end_x, end_y;
+    int step = 2;
+    int x_min_cost = x_orig, y_min_cost = y_orig;
+    uint64_t cost, cost_min;
+
+    if (!(cost_min = get_mad(s, x_cur, y_cur, x_cur, y_cur, dir))) {
+        *dx = 0;
+        *dy = 0;
+        return;
+    }
+
+    do {
+        start_x = av_clip(x_orig - step, 0, x_orig);
+        start_y = av_clip(y_orig - step, 0, y_orig);
+        end_x = av_clip(x_orig + step + 1, 0, inlink->w - s->mb_size);
+        end_y = av_clip(y_orig + step + 1, 0, inlink->h - s->mb_size);
+
+        for (y = start_y; y < end_y; y += step) {
+            for (x = start_x; x < end_x; x += step) {
+
+                // skips already checked current origin
+                if (x == x_orig && y == y_orig)
+                    continue;
+
+                if (FFABS(x_orig - x) + FFABS(y_orig - y) != step)
+                    continue;
+
+                cost = get_mad(s, x_cur, y_cur, x, y, dir);
+                if (!cost) {
+                    *dx = x - x_cur;
+                    *dy = y - y_cur;
+                    return;
+                } else if (cost < cost_min) {
+                    cost_min = cost;
+                    x_min_cost = x;
+                    y_min_cost = y;
+                }
+            }
+        }
+
+        if (step == 1)
+            break;
+
+        if (x_min_cost == x_orig && y_min_cost == y_orig ||
+            FFABS(x_min_cost - x_cur) >= s->search_param || FFABS(y_min_cost - y_cur) >= s->search_param)
+            step = 1;
+        else {
+            //TODO skip repeated
+            x_orig = x_min_cost;
+            y_orig = y_min_cost;
         }
 
     } while (step > 0);
@@ -520,6 +583,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                 for (y = 0; y < inlink->h; y += s->mb_size)
                     for (x = 0; x < inlink->w; x += s->mb_size)
                         for (dir = 0; dir < 2; dir++) {
+                            dx = 0; dy = 0;
                             search_mv_esa(inlink, x, y, &dx, &dy, dir);
                             add_mv_data(s->mvs + s->mv_count++, s->mb_size, x, y, dx, dy, dir);
                         }
@@ -529,6 +593,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                 for (y = 0; y < inlink->h; y += s->mb_size)
                     for (x = 0; x < inlink->w; x += s->mb_size)
                         for (dir = 0; dir < 2; dir++) {
+                            dx = 0; dy = 0;
                             search_mv_tss(inlink, x, y, &dx, &dy, dir);
                             add_mv_data(s->mvs + s->mv_count++, s->mb_size, x, y, dx, dy, dir);
                         }
@@ -538,6 +603,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                 for (y = 0; y < inlink->h; y += s->mb_size)
                     for (x = 0; x < inlink->w; x += s->mb_size)
                         for (dir = 0; dir < 2; dir++) {
+                            dx = 0; dy = 0;
                             search_mv_ntss(inlink, x, y, &dx, &dy, dir);
                             add_mv_data(s->mvs + s->mv_count++, s->mb_size, x, y, dx, dy, dir);
                         }
@@ -547,6 +613,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                 for (y = 0; y < inlink->h; y += s->mb_size)
                     for (x = 0; x < inlink->w; x += s->mb_size)
                         for (dir = 0; dir < 2; dir++) {
+                            dx = 0; dy = 0;
                             search_mv_tdls(inlink, x, y, &dx, &dy, dir);
                             add_mv_data(s->mvs + s->mv_count++, s->mb_size, x, y, dx, dy, dir);
                         }
@@ -556,7 +623,18 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                 for (y = 0; y < inlink->h; y += s->mb_size)
                     for (x = 0; x < inlink->w; x += s->mb_size)
                         for (dir = 0; dir < 2; dir++) {
+                            dx = 0; dy = 0;
                             search_mv_fss(inlink, x, y, &dx, &dy, dir);
+                            add_mv_data(s->mvs + s->mv_count++, s->mb_size, x, y, dx, dy, dir);
+                        }
+                break;
+            case ME_METHOD_DIA:
+                /* diamond search */
+                for (y = 0; y < inlink->h; y += s->mb_size)
+                    for (x = 0; x < inlink->w; x += s->mb_size)
+                        for (dir = 0; dir < 2; dir++) {
+                            dx = 0; dy = 0;
+                            search_mv_dia(inlink, x, y, &dx, &dy, dir);
                             add_mv_data(s->mvs + s->mv_count++, s->mb_size, x, y, dx, dy, dir);
                         }
                 break;
