@@ -589,39 +589,40 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     me_ctx->next = frame;
     s->mv_count = 0;
 
-    if (me_ctx->cur) {
-
-        switch (s->method) {
-            case ME_METHOD_ESA:
-                /* exhaustive search */
-                SEARCH_MV(esa);
-                break;
-            case ME_METHOD_TSS:
-                /* three step search */
-                SEARCH_MV(tss);
-                break;
-            case ME_METHOD_NTSS:
-                /* new three step search */
-                SEARCH_MV(ntss);
-                break;
-            case ME_METHOD_TDLS:
-                /* two dimensional logarithmic search */
-                SEARCH_MV(tdls);
-                break;
-            case ME_METHOD_FSS:
-                /* four step search */
-                SEARCH_MV(fss);
-                break;
-            case ME_METHOD_DIA:
-                /* diamond search */
-                SEARCH_MV(dia);
-                break;
-        }
-
-    } else { // no vectors will be generated if cloned, so skipping for first frame (me_ctx->prev, me_ctx->next are null)
-        me_ctx->cur = av_frame_clone(me_ctx->next);
+    if (!me_ctx->cur) {
+        me_ctx->cur = av_frame_clone(frame);
         if (!me_ctx->cur)
             return AVERROR(ENOMEM);
+    }
+
+    if (!me_ctx->prev)
+        return 0;
+
+    switch (s->method) {
+        case ME_METHOD_ESA:
+            /* exhaustive search */
+            SEARCH_MV(esa);
+            break;
+        case ME_METHOD_TSS:
+            /* three step search */
+            SEARCH_MV(tss);
+            break;
+        case ME_METHOD_NTSS:
+            /* new three step search */
+            SEARCH_MV(ntss);
+            break;
+        case ME_METHOD_TDLS:
+            /* two dimensional logarithmic search */
+            SEARCH_MV(tdls);
+            break;
+        case ME_METHOD_FSS:
+            /* four step search */
+            SEARCH_MV(fss);
+            break;
+        case ME_METHOD_DIA:
+            /* diamond search */
+            SEARCH_MV(dia);
+            break;
     }
 
     AVFrame *out = av_frame_clone(me_ctx->cur);
