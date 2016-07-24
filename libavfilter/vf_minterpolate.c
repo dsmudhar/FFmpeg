@@ -173,18 +173,18 @@ typedef struct Cluster {
 } Cluster;
 
 typedef struct Block {
-    int16_t mv[2][2];           ///< motion vector[dir][x,y]
+    int mv;                     ///< motion vector boolean
+    int16_t mvs[2][2];          ///< motion vectors[dir][x,y]
     int cid;                    ///< cluster id
-    int hasmv;
-    uint64_t sbad;
+    uint64_t sbad;              ///< sum of bilateral abs diffs
     int sb;                     ///< sub-blocks boolean
     struct Block *subs;         ///< sub-blocks
 } Block;
 
 typedef struct Pixel {
-    int16_t mv[NB_PIXEL_MVS][2];
-    uint32_t weight[NB_PIXEL_MVS];
-    int8_t ref[NB_PIXEL_MVS];
+    int16_t mvs[NB_PIXEL_MVS][2];
+    uint32_t weights[NB_PIXEL_MVS];
+    int8_t refs[NB_PIXEL_MVS];
     int nb;
 } Pixel;
 
@@ -314,6 +314,507 @@ static int config_output(AVFilterLink *outlink)
     return 0;
 }
 
+const char *dir = "/Users/dsm/ffmpeg_cache/bbb_720p_30fps/small/frame_";
+static void copy_mvs(AVFrame *);
+static void read_mvs(MIContext *, Frame *);
+
+typedef uint64_t (*CostFunc)(MIContext *, int, int, int, int, int);
+
+static uint64_t get_sbad(MIContext *mi_ctx, int mb_size, int x, int y, int mv_x, int mv_y)
+{
+    uint8_t *buf_prev = mi_ctx->frames[1].avf->data[0];
+    uint8_t *buf_next = mi_ctx->frames[2].avf->data[0];
+    int linesize = mi_ctx->frames[0].avf->linesize[0];
+    int64_t sbad = 0;
+    int i, j;
+
+    buf_prev += (y + mv_y) * linesize;
+    buf_next += (y - mv_y) * linesize;
+
+    av_assert0(linesize == mi_ctx->frames[2].avf->linesize[0]); //TEST
+
+    //re-clip again since it's bilateral
+    if (x - FFABS(mv_x) < 0 || y - FFABS(mv_y) < 0 ||
+        x + FFABS(mv_x) + mb_size > mi_ctx->frames[0].avf->width - 1 ||
+        y + FFABS(mv_y) + mb_size > mi_ctx->frames[0].avf->height - 1)
+        return UINT64_MAX; //TODO do one directional ME.
+
+    for (j = 0; j < mb_size; j++)
+        for (i = 0; i < mb_size; i++)
+            sbad += FFABS(buf_prev[x + mv_x + i + j * linesize] - buf_next[x - mv_x + i + j * linesize]);
+
+    return sbad;
+}
+
+#define SBAD_WEIGHT 0.4
+#define INTPOL_PX(px, py, mvx, mvy) ((buf_prev[px + mvx + (py + mvy) * linesize] + buf_next[px - mvx + (py - mvy) * linesize]) / 2)
+
+static uint64_t get_sbad_smd(MIContext *mi_ctx, int mb_size, int x, int y, int mv_x, int mv_y)
+{
+    uint8_t *buf_prev = mi_ctx->frames[1].avf->data[0];
+    uint8_t *buf_next = mi_ctx->frames[2].avf->data[0];
+    int linesize = mi_ctx->frames[0].avf->linesize[0];
+    int64_t sbad = get_sbad(mi_ctx, mb_size, x, y, mv_x, mv_y), smd = 0;
+    int i, nb_bpx = 0;
+    int mb_x, mb_y;
+    Block *nb;
+
+    mb_x = AV_CEIL_RSHIFT(x, mi_ctx->log2_mb_size);
+    mb_y = AV_CEIL_RSHIFT(y, mi_ctx->log2_mb_size);
+
+    nb = &mi_ctx->int_blocks[mb_x + (mb_y - 1) * mi_ctx->b_width];
+    if (nb->mv)
+        for (i = x; i < x + mb_size; i++) {
+            smd += FFABS(INTPOL_PX(i, y, mv_x, mv_y) - INTPOL_PX(i, y - 1, nb->mvs[0][0], nb->mvs[0][1]));
+            nb_bpx++;
+        }
+
+    nb = &mi_ctx->int_blocks[mb_x + (mb_y + 1) * mi_ctx->b_width];
+    if (nb->mv)
+        for (i = x; i < x + mb_size; i++) {
+            smd += FFABS(INTPOL_PX(i, y + mb_size - 1, mv_x, mv_y) - INTPOL_PX(i, y + mb_size, nb->mvs[0][0], nb->mvs[0][1]));
+            nb_bpx++;
+        }
+
+    nb = &mi_ctx->int_blocks[mb_x - 1 + mb_y * mi_ctx->b_width];
+    if (nb->mv)
+        for (i = y; i < y + mb_size; i++) {
+            smd += FFABS(INTPOL_PX(x, i, mv_x, mv_y) - INTPOL_PX(x - 1, i, nb->mvs[0][0], nb->mvs[0][1]));
+            nb_bpx++;
+        }
+
+    nb = &mi_ctx->int_blocks[mb_x + 1 + mb_y * mi_ctx->b_width];
+    if (nb->mv)
+        for (i = y; i < y + mb_size; i++) {
+            smd += FFABS(INTPOL_PX(x + mb_size - 1, i, mv_x, mv_y) - INTPOL_PX(x + mb_size, i, nb->mvs[0][0], nb->mvs[0][1]));
+            nb_bpx++;
+        }
+
+    return SBAD_WEIGHT * sbad + (1 - SBAD_WEIGHT) * smd / nb_bpx;
+}
+
+static uint64_t search_mv_dia(MIContext *mi_ctx, CostFunc get_cost, int mb_size, int x_mb, int y_mb, int *dx, int *dy)
+{
+    int x, y;
+    int x_orig = x_mb, y_orig = y_mb;
+    int start_x, start_y, end_x, end_y;
+    int step = 2;
+    int x_min_cost = x_orig, y_min_cost = y_orig;
+    uint64_t cost, cost_min;
+
+    if (!(cost_min = get_cost(mi_ctx, mb_size, x_mb, y_mb, 0, 0)))
+        return cost_min;
+
+    do {
+        start_x = av_clip(x_orig - step, 0, x_orig);
+        start_y = av_clip(y_orig - step, 0, y_orig);
+        end_x = av_clip(x_orig + step + 1, 0, mi_ctx->frames[0].avf->width - mi_ctx->mb_size);
+        end_y = av_clip(y_orig + step + 1, 0, mi_ctx->frames[0].avf->height - mi_ctx->mb_size);
+
+        for (y = start_y; y < end_y; y += step) {
+            for (x = start_x; x < end_x; x += step) {
+
+                // skips already checked current origin
+                if (x == x_orig && y == y_orig)
+                    continue;
+
+                if (FFABS(x_orig - x) + FFABS(y_orig - y) != step)
+                    continue;
+
+                cost = get_cost(mi_ctx, mb_size, x_mb, y_mb, x - x_mb, y - y_mb);
+                if (!cost) {
+                    *dx = x - x_mb;
+                    *dy = y - y_mb;
+                    return cost_min;
+                } else if (cost < cost_min) {
+                    cost_min = cost;
+                    x_min_cost = x;
+                    y_min_cost = y;
+                }
+            }
+        }
+
+        if (step == 1)
+            break;
+
+        if (x_min_cost == x_orig && y_min_cost == y_orig ||
+            FFABS(x_min_cost - x_mb) >= mi_ctx->search_param || FFABS(y_min_cost - y_mb) >= mi_ctx->search_param)
+            step = 1;
+        else {
+            //TODO skip repeated
+            x_orig = x_min_cost;
+            y_orig = y_min_cost;
+        }
+
+    } while (step > 0);
+
+    *dx = x_min_cost - x_mb;
+    *dy = y_min_cost - y_mb;
+
+    return cost_min;
+}
+
+static uint64_t search_mv_esa(MIContext *mi_ctx, CostFunc get_cost, int mb_size, int x_mb, int y_mb, int *mv_x, int *mv_y)
+{
+    int x, y;
+    int p = mi_ctx->search_param;
+    int start_x = av_clip(x_mb - p, 0, x_mb);
+    int start_y = av_clip(y_mb - p, 0, y_mb);
+    int end_x = av_clip(x_mb + p + 1, 0, mi_ctx->frames[0].avf->width - mb_size);
+    int end_y = av_clip(y_mb + p + 1, 0, mi_ctx->frames[0].avf->height - mb_size);
+    uint64_t cost, cost_min;
+
+    if (!(cost_min = get_cost(mi_ctx, mb_size, x_mb, y_mb, 0, 0))) {
+        *mv_x = 0;
+        *mv_y = 0;
+        return cost_min;
+    }
+
+    for (y = start_y; y < end_y; y++)
+        for (x = start_x; x < end_x; x++) {
+            if ((cost = get_cost(mi_ctx, mb_size, x_mb, y_mb, x - x_mb, y - y_mb)) < cost_min) {
+                cost_min = cost;
+                *mv_x = x - x_mb;
+                *mv_y = y - y_mb;
+            } else if (cost == cost_min) {
+                int mv_x1 = x - x_mb;
+                int mv_y1 = y - y_mb;
+                if (mv_x1 * mv_x1 + mv_y1 * mv_y1 < *mv_x * *mv_x + *mv_y * *mv_y) {
+                    *mv_x = mv_x1;
+                    *mv_y = mv_y1;
+                }
+            }
+        }
+
+    return cost_min;
+}
+
+static void bilateral_me(MIContext *mi_ctx)
+{
+    Block *block;
+    int mb_x, mb_y, i, j;
+    int mv_x, mv_y;
+    int changed;
+    int count = 0;
+
+    for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
+        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
+            block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
+
+            block->cid = 0;
+            block->sb = 0;
+            block->mv = 0;
+
+            block->mvs[0][0] = 0;
+            block->mvs[0][1] = 0;
+
+            if (mb_x == 0 || mb_y == 0 || mb_x == mi_ctx->b_width - 1 || mb_y == mi_ctx->b_height - 1)
+                block->mv = 1;
+
+        #if CACHE_MVS
+            int mb_i = mb_x + mb_y * mi_ctx->b_width;
+            mv_x = (mi_ctx->frames[2].blocks[mb_i].mvs[0][0] - mi_ctx->frames[1].blocks[mb_i].mvs[1][0]) / 4;
+            mv_y = (mi_ctx->frames[2].blocks[mb_i].mvs[0][1] - mi_ctx->frames[1].blocks[mb_i].mvs[1][1]) / 4;
+            block->mvs[0][0] = mv_x;
+            block->mvs[0][1] = mv_y;
+        #endif
+        }
+
+#if !CACHE_MVS
+    do {
+        changed = 0;
+        if (++count > 10) {
+            av_log(0, 0, "iteration limit reached\n");
+            break;
+        }
+
+        for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
+            for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
+                block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
+
+                mv_x = 0; mv_y = 0;
+
+                if (mb_x != 0 && mb_y != 0 && mb_x != mi_ctx->b_width - 1 && mb_y != mi_ctx->b_height - 1) {
+                    search_mv_esa(mi_ctx, &get_sbad_smd, mi_ctx->mb_size,
+                                  mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, &mv_x, &mv_y);
+                    if (block->mv && (block->mvs[0][0] != mv_x || block->mvs[0][1] != mv_y)) {
+                        //if (block->mvs[0][0] && block->mvs[0][1]) av_log(0, 0, "block: (%d, %d), old: (%d, %d), new: (%d, %d)\n", mb_x, mb_y, block->mvs[0][0], block->mvs[0][1], mv_x, mv_y);
+                        changed = 1;
+                    } else
+                        block->mv = 1;
+
+                    block->mvs[0][0] = mv_x;
+                    block->mvs[0][1] = mv_y;
+
+                }
+            }
+
+        if (count == 1)
+            changed = 1;
+
+    } while (changed);
+#endif
+
+    for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
+        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
+            block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
+
+            mi_ctx->clusters[0].sum[0] += block->mvs[0][0];
+            mi_ctx->clusters[0].sum[1] += block->mvs[0][1];
+
+        #if ENABLE_AOBMC
+            block->sbad = get_sbad(mi_ctx, mi_ctx->mb_size, mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, block->mvs[0][0], block->mvs[0][1]);
+        #endif
+        }
+
+    mi_ctx->clusters[0].nb = mi_ctx->b_width * mi_ctx->b_height;
+}
+
+static int var_size_bme(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int n)
+{
+    uint8_t *buf_prev = mi_ctx->frames[1].avf->data[0];
+    uint8_t *buf_next = mi_ctx->frames[2].avf->data[0];
+    int linesize = mi_ctx->frames[0].avf->linesize[0];
+    uint64_t cost_sb, cost_old = 0;
+    int mv_x, mv_y, i, j;
+    int x, y;
+    int ret;
+
+    mv_x = block->mvs[0][0];
+    mv_y = block->mvs[0][1];
+
+    buf_prev += (y_mb + mv_y) * linesize;
+    buf_next += (y_mb - mv_y) * linesize;
+
+    av_assert0(y_mb - FFABS(mv_y) >= 0 && y_mb + FFABS(mv_y) < mi_ctx->frames[0].avf->height);
+    av_assert0(x_mb - FFABS(mv_x) >= 0 && x_mb + FFABS(mv_x) < mi_ctx->frames[0].avf->width);
+
+    for (j = 0; j < 1 << n; j++)
+        for (i = 0; i < 1 << n; i++)
+            cost_old += FFABS(buf_prev[x_mb + mv_x + i + j * linesize] - buf_next[x_mb - mv_x + i + j * linesize]);
+
+    if (!cost_old) {
+        block->sb = 0;
+        return 0;
+    }
+
+    if (!block->subs)
+        block->subs = av_mallocz_array(4, sizeof(Block));
+    if (!block->subs)
+        return AVERROR(ENOMEM);
+
+    block->sb = 1;
+
+    for (y = 0; y < 2; y++)
+        for (x = 0; x < 2; x++) {
+        Block *sb = &block->subs[x + y * 2];
+
+        /* TODO test: since block size can be as low as 2x2, should use MSE instead of MAD for better results? */
+        mv_x = INT_MAX; mv_y = INT_MAX;
+
+        cost_sb = search_mv_esa(mi_ctx, &get_sbad, 1 << (n - 1), x_mb, y_mb, &mv_x, &mv_y);
+        const int T = 4;
+
+        if (mv_x != INT_MAX && mv_y != INT_MAX && /* TODO what if no vector is found? */
+            #if VSBME_T1
+            FFABS(mv_x - block->mvs[0][0]) <= T && FFABS(mv_y - block->mvs[0][1]) <= T &&
+            #endif
+            cost_sb < cost_old / 4) {
+
+            sb->mvs[0][0] = mv_x;
+            sb->mvs[0][1] = mv_y;
+            //if (sb->mvs[0][0]/2 != block->mvs[0][0]/2 || sb->mvs[0][1]/2 != block->mvs[0][1]/2) av_log(0, 0, "new mv: (%d, %d) vs (%d, %d)\n", sb->mvs[0][0], sb->mvs[0][1], block->mvs[0][0], block->mvs[0][1]);
+
+            if (n > 1) {
+                if (ret = var_size_bme(mi_ctx, sb, x_mb + (x << (n - 1)), y_mb + (y << (n - 1)), n - 1))
+                    return ret;
+            } else
+                sb->sb = 0;
+        } else {
+            block->sb = 0;
+            return 0;
+        }
+    }
+
+    return 0;
+}
+
+static int cls_max;
+static int cluster_mvs(MIContext *mi_ctx)
+{
+    int changed, c, c_max = 0;
+    int mb_x, mb_y, x, y;
+    int mv_x, mv_y, avg_x, avg_y, dx, dy;
+    int ret;
+    Block *block;
+    Cluster *cluster, *cluster_new;
+
+    do {
+        changed = 0;
+        for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
+            for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
+                block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
+                c = block->cid;
+                cluster = &mi_ctx->clusters[c];
+                mv_x = block->mvs[0][0];
+                mv_y = block->mvs[0][1];
+
+                if (cluster->nb < 2)
+                    continue;
+
+                avg_x = cluster->sum[0] / cluster->nb;
+                avg_y = cluster->sum[1] / cluster->nb;
+                dx = avg_x - mv_x;
+                dy = avg_y - mv_y;
+        #if 0
+                if (FFABS(avg_x + avg_y - FFABS(mv_x) - FFABS(mv_y)) > (CLUSTER_THRESHOLD << mi_ctx->log2_mv_precission)) {
+        #else
+                if (FFABS(avg_x - mv_x) > (CLUSTER_THRESHOLD << mi_ctx->log2_mv_precission) ||
+                    FFABS(avg_y - mv_y) > (CLUSTER_THRESHOLD << mi_ctx->log2_mv_precission)) {
+        #endif
+
+                    int d; //TODO
+                    for (d = 1; d < 5; d++)
+                    for (y = FFMAX(mb_y - d, 0); y < FFMIN(mb_y + d + 1, mi_ctx->b_height); y++)
+                        for (x = FFMAX(mb_x - d, 0); x < FFMIN(mb_x + d + 1, mi_ctx->b_width); x++) {
+                            Block *b = &mi_ctx->int_blocks[x + y * mi_ctx->b_width];
+                            //if ((x - mb_x) && (y - mb_y))
+                            //    continue;
+                            if (b->cid > c) {
+                                c = b->cid;
+                                goto break1;
+                            }
+                        }
+
+                    break1:
+
+                    if (c == block->cid)
+                        c = c_max + 1;
+
+                    if (c >= NB_CLUSTERS) {
+                        av_log(0, 0, "Out of memory!\n");
+                        continue;
+                    }
+
+                    cluster_new = &mi_ctx->clusters[c];
+                    cluster_new->sum[0] += mv_x;
+                    cluster_new->sum[1] += mv_y;
+                    cluster->sum[0] -= mv_x;
+                    cluster->sum[1] -= mv_y;
+                    cluster_new->nb++;
+                    cluster->nb--;
+
+                    c_max = FFMAX(c_max, c);
+                    cls_max = c_max;
+                    block->cid = c;
+
+                    changed = 1;
+                }
+            }
+    } while (changed);
+
+    /* find boundaries */
+    for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
+        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
+            block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
+            for (y = FFMAX(mb_y - 1, 0); y < FFMIN(mb_y + 2, mi_ctx->b_height); y++)
+                for (x = FFMAX(mb_x - 1, 0); x < FFMIN(mb_x + 2, mi_ctx->b_width); x++) {
+                    dx = x - mb_x;
+                    dy = y - mb_y;
+
+                    if ((x - mb_x) && (y - mb_y) || !dx && !dy)
+                        continue;
+
+                    if (!mb_x || !mb_y || mb_x == mi_ctx->b_width - 1 || mb_y == mi_ctx->b_height - 1)
+                        continue; //TODO test if frame boundaries don't introduce artifacts
+
+                    //if (mi_ctx->int_blocks[x + y * mi_ctx->b_width].cid == 0) {
+                    if (block->cid != mi_ctx->int_blocks[x + y * mi_ctx->b_width].cid) {
+                        if (!dx && block->cid == mi_ctx->int_blocks[x + (mb_y - dy) * mi_ctx->b_width].cid ||
+                            !dy && block->cid == mi_ctx->int_blocks[(mb_x - dx) + y * mi_ctx->b_width].cid) {
+                            if (ret = var_size_bme(mi_ctx, block, mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, mi_ctx->log2_mb_size))
+                                return ret;
+                        }
+                    }
+                }
+        }
+
+    return 0;
+}
+
+static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
+{
+    AVFilterContext *ctx = inlink->dst;
+    MIContext *mi_ctx = ctx->priv;
+    Frame frame_tmp, *frame;
+    int i, dir, ret;
+
+    av_frame_free(&mi_ctx->frames[0].avf);
+    frame_tmp = mi_ctx->frames[0];
+    memmove(&mi_ctx->frames[0], &mi_ctx->frames[1], sizeof(mi_ctx->frames[0]) * (NB_FRAMES - 1));
+    mi_ctx->frames[NB_FRAMES - 1] = frame_tmp;
+    mi_ctx->frames[NB_FRAMES - 1].avf = avf_in;
+    frame = &mi_ctx->frames[NB_FRAMES - 1];
+
+    if (mi_ctx->mi_mode == MI_MODE_OBMC) {
+        /* keeping this for later use (optimization with exported motion vectors) */
+        AVFrameSideData *sd = av_frame_get_side_data(frame->avf, AV_FRAME_DATA_MOTION_VECTORS);
+
+        for (i = 0; i < mi_ctx->b_height * mi_ctx->b_width; i++)
+            for (dir = 0; dir < 2; dir++) {
+                frame->blocks[i].mvs[dir][0] = 0;
+                frame->blocks[i].mvs[dir][1] = 0;
+            }
+
+        if (sd) {
+            AVMotionVector *mvs = (AVMotionVector *) sd->data;
+
+            for (i = 0; i < sd->size / sizeof(AVMotionVector); i++) {
+                AVMotionVector *mv = &mvs[i];
+                int mb_i, mb_y, mb_x;
+
+                mb_x = av_clip((mv->dst_x /*- mv->w / 2*/) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_width - 1);
+                mb_y = av_clip((mv->dst_y /*- mv->h / 2*/) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_height - 1);
+
+                dir = mv->source > 0;
+                mb_i = mb_x + mi_ctx->b_width * mb_y; //TODO subblocks from export_mvs
+
+                frame->blocks[mb_i].mvs[dir][0] = (mv->src_x - mv->dst_x) << mi_ctx->log2_mv_precission; //TODO qpel
+                frame->blocks[mb_i].mvs[dir][1] = (mv->src_y - mv->dst_y) << mi_ctx->log2_mv_precission;
+
+            }
+        }
+    }
+
+#if CACHE_MVS
+    /* save mvs to disk, if available */
+    copy_mvs(frame->avf);
+    read_mvs(mi_ctx, frame);
+#endif
+
+    if (mi_ctx->mi_mode == MI_MODE_PAPER2) {
+
+        if (!mi_ctx->frames[0].avf)
+            return 0;
+
+        // reset clusters
+        for (i = 0; i < NB_CLUSTERS; i++) {
+            mi_ctx->clusters[i].sum[0] = 0;
+            mi_ctx->clusters[i].sum[1] = 0;
+            mi_ctx->clusters[i].nb = 0;
+        }
+
+        bilateral_me(mi_ctx);
+
+    #if ENABLE_CLUSTERING
+        if (ret = cluster_mvs(mi_ctx))
+            return ret;
+    #endif
+    }
+
+    return 0;
+}
+
 static int get_roughness(MIContext *mi_ctx, int mb_x, int mb_y, int mv_x, int mv_y, int dir)
 {
     int x, y;
@@ -328,14 +829,14 @@ static int get_roughness(MIContext *mi_ctx, int mb_x, int mb_y, int mv_x, int mv
                 if (x == mb_x && y == mb_y)
                     continue;
 
-                mv_x1 = mi_ctx->int_blocks[x + y * mi_ctx->b_width].mv[0][0] * 2;
-                mv_y1 = mi_ctx->int_blocks[x + y * mi_ctx->b_width].mv[0][1] * 2;
+                mv_x1 = mi_ctx->int_blocks[x + y * mi_ctx->b_width].mvs[0][0] * 2;
+                mv_y1 = mi_ctx->int_blocks[x + y * mi_ctx->b_width].mvs[0][1] * 2;
             } else {
                 if (x == mb_x && y == mb_y)
                     dir1 = 1 - dir;
 
-                mv_x1 = mi_ctx->frames[2 - dir].blocks[x + y * mi_ctx->b_width].mv[dir1][0];
-                mv_y1 = mi_ctx->frames[2 - dir].blocks[x + y * mi_ctx->b_width].mv[dir1][1];
+                mv_x1 = mi_ctx->frames[2 - dir].blocks[x + y * mi_ctx->b_width].mvs[dir1][0];
+                mv_y1 = mi_ctx->frames[2 - dir].blocks[x + y * mi_ctx->b_width].mvs[dir1][1];
                 if (dir != dir1) {
                     mv_x1 = -mv_x1;
                     mv_y1 = -mv_y1;
@@ -350,20 +851,193 @@ static int get_roughness(MIContext *mi_ctx, int mb_x, int mb_y, int mv_x, int mv
 
 #define PIXEL_INIT(b_weight, mv_x, mv_y)                                                            \
     do {                                                                                            \
-        pixel->ref[pixel->nb] = 1;                                                                  \
-        pixel->weight[pixel->nb] = b_weight * (ALPHA_MAX - alpha);                                  \
-        pixel->mv[pixel->nb][0] = av_clip((mv_x * alpha) / ALPHA_MAX, x_min, x_max);                \
-        pixel->mv[pixel->nb][1] = av_clip((mv_y * alpha) / ALPHA_MAX, y_min, y_max);                \
+        pixel->refs[pixel->nb] = 1;                                                                 \
+        pixel->weights[pixel->nb] = b_weight * (ALPHA_MAX - alpha);                                 \
+        pixel->mvs[pixel->nb][0] = av_clip((mv_x * alpha) / ALPHA_MAX, x_min, x_max);               \
+        pixel->mvs[pixel->nb][1] = av_clip((mv_y * alpha) / ALPHA_MAX, y_min, y_max);               \
         pixel->nb++;                                                                                \
                                                                                                     \
-        pixel->ref[pixel->nb] = 2;                                                                  \
-        pixel->weight[pixel->nb] = b_weight * alpha;                                                \
-        pixel->mv[pixel->nb][0] = av_clip(-mv_x * (ALPHA_MAX - alpha) / ALPHA_MAX, x_min, x_max);   \
-        pixel->mv[pixel->nb][1] = av_clip(-mv_y * (ALPHA_MAX - alpha) / ALPHA_MAX, y_min, y_max);   \
+        pixel->refs[pixel->nb] = 2;                                                                 \
+        pixel->weights[pixel->nb] = b_weight * alpha;                                               \
+        pixel->mvs[pixel->nb][0] = av_clip(-mv_x * (ALPHA_MAX - alpha) / ALPHA_MAX, x_min, x_max);  \
+        pixel->mvs[pixel->nb][1] = av_clip(-mv_y * (ALPHA_MAX - alpha) / ALPHA_MAX, y_min, y_max);  \
         pixel->nb++;                                                                                \
     } while(0)
 
-static uint64_t get_sbad(MIContext *, int, int, int, int, int);
+static void obmc(MIContext *mi_ctx, int alpha)
+{
+    int x, y;
+    int width = mi_ctx->frames[0].avf->width;
+    int height = mi_ctx->frames[0].avf->height;
+    int mb_y, mb_x, dir;
+
+    /*for (y = 0; y < height; y++)
+        for (x = 0; x < width; x++) {
+            Pixel *p = &mi_ctx->pixels[x + y * width];
+            p->weights[0] = ALPHA_MAX - alpha;
+            p->refs[0] = 1;
+            p->mvs[0][0] = 0;
+            p->mvs[0][1] = 0;
+            p->weights[1] = alpha;
+            p->refs[1] = 2;
+            p->mvs[1][0] = 0;
+            p->mvs[1][1] = 0;
+            p->nb = 2;
+            // p->nb = 0; // no blending / filling
+        }
+    */
+
+    for (y = 0; y < height; y++)
+        for (x = 0; x < width; x++)
+            mi_ctx->pixels[x + y * width].nb = 0;
+
+    // no need, each block will have vector, atleast in ESA
+    //if (mi_ctx->b_height * mi_ctx->b_width * 5 / 8 > nomv)
+    for (dir = 0; dir < 2; dir++)
+        for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
+            for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
+                int mv_x = mi_ctx->frames[2 - dir].blocks[mb_x + mb_y * mi_ctx->b_width].mvs[dir][0];
+                int mv_y = mi_ctx->frames[2 - dir].blocks[mb_x + mb_y * mi_ctx->b_width].mvs[dir][1];
+                int start_x, start_y;
+                int startc_x, startc_y, endc_x, endc_y;
+
+                if (get_roughness(mi_ctx, mb_x, mb_y, mv_x, mv_y, dir) > ROUGHNESS << mi_ctx->log2_mv_precission)
+                    continue;
+
+                start_x = (mb_x << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2;
+                start_y = (mb_y << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2;
+
+                startc_x = av_clip(start_x, 0, width - 1);
+                startc_y = av_clip(start_y, 0, height - 1);
+                endc_x = av_clip(start_x + (2 << mi_ctx->log2_mb_size), 0, width - 1);
+                endc_y = av_clip(start_y + (2 << mi_ctx->log2_mb_size), 0, height - 1);
+
+                if (dir) {
+                    mv_x = -mv_x;
+                    mv_y = -mv_y;
+                }
+
+                for (y = startc_y; y < endc_y; y++) {
+                    int y_min = -y << mi_ctx->log2_mv_precission;
+                    int y_max = (height - y - 1) << mi_ctx->log2_mv_precission;
+                    for (x = startc_x; x < endc_x; x++) {
+                        int x_min = -x << mi_ctx->log2_mv_precission;
+                        int x_max = (width - x - 1) << mi_ctx->log2_mv_precission;
+                        int obmc_weight = obmc_tab_linear[4 - mi_ctx->log2_mb_size][(x - start_x) + ((y - start_y) << (mi_ctx->log2_mb_size + 1))];
+                        Pixel *pixel = &mi_ctx->pixels[x + y * width];
+
+                        if (pixel->nb + 1 >= NB_PIXEL_MVS) //FIXME discrad the vector of lowest weight
+                            continue;
+
+                        PIXEL_INIT(obmc_weight, mv_x, mv_y);
+                    }
+                }
+            }
+}
+
+static void interpolate_pixels(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
+{
+    int x, y, plane;
+
+    for (plane = 0; plane < mi_ctx->nb_planes; plane++) {
+        int width = avf_out->width;
+        int height = avf_out->height;
+
+        if (plane == 1 || plane == 2) {
+            width = mi_ctx->chroma_width;
+            height = mi_ctx->chroma_height;
+        }
+
+        for (y = 0; y < height; y++)
+            for (x = 0; x < width; x++) {
+                int i;
+                int weight_sum = 0;
+                int v = 0;
+                Pixel *pixel;
+                if (plane == 1 || plane == 2) //FIXME optimize
+                    pixel = &mi_ctx->pixels[(x << mi_ctx->chroma_h_shift) + (y << mi_ctx->chroma_v_shift) * avf_out->width];
+                else
+                    pixel = &mi_ctx->pixels[x + y * avf_out->width];
+
+                //FIXME optimize
+                for (i = 0; i < pixel->nb; i++)
+                    weight_sum += pixel->weights[i];
+
+                if (!weight_sum || !pixel->nb) {
+                    pixel->weights[0] = ALPHA_MAX - alpha;
+                    pixel->refs[0] = 1;
+                    pixel->mvs[0][0] = 0;
+                    pixel->mvs[0][1] = 0;
+                    pixel->weights[1] = alpha;
+                    pixel->refs[1] = 2;
+                    pixel->mvs[1][0] = 0;
+                    pixel->mvs[1][1] = 0;
+                    pixel->nb = 2;
+
+                    weight_sum = ALPHA_MAX;
+                }
+
+                for (i = 0; i < pixel->nb; i++) {
+                    int is_chroma = plane == 1 || plane == 2; //FIXME
+                    int x_mv = x + (pixel->mvs[i][0] >> (mi_ctx->log2_mv_precission + is_chroma));
+                    int y_mv = y + (pixel->mvs[i][1] >> (mi_ctx->log2_mv_precission + is_chroma));
+                    Frame *frame = &mi_ctx->frames[pixel->refs[i]];
+
+                    av_assert0(x_mv >= 0 && x_mv < mi_ctx->frames[0].avf->width);
+                    av_assert0(y_mv >= 0 && y_mv < mi_ctx->frames[0].avf->height);
+
+                    v += pixel->weights[i] * frame->avf->data[plane][x_mv + y_mv * frame->avf->linesize[plane]];
+                }
+
+                avf_out->data[plane][x + y * avf_out->linesize[plane]] = ROUNDED_DIV(v, weight_sum);
+            }
+    }
+}
+
+static void var_size_bmc(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int n, int alpha)
+{
+    int sb_x, sb_y;
+    int width = mi_ctx->frames[0].avf->width;
+    int height = mi_ctx->frames[0].avf->height;
+
+    for (sb_y = 0; sb_y < 2; sb_y++)
+        for (sb_x = 0; sb_x < 2; sb_x++) {
+            Block *sb = &block->subs[sb_x + sb_y * 2];
+
+            if (sb->sb)
+                var_size_bmc(mi_ctx, sb, x_mb + (sb_x << (n - 1)), y_mb + (sb_y << (n - 1)), n - 1, alpha);
+            else {
+                int x, y;
+                int mv_x = sb->mvs[0][0] * 2;
+                int mv_y = sb->mvs[0][1] * 2;
+
+                int start_x = x_mb + (sb_x << (n - 1));
+                int start_y = y_mb + (sb_y << (n - 1));
+                int end_x = start_x + (1 << (n - 1));
+                int end_y = start_y + (1 << (n - 1));
+
+                for (y = start_y; y < end_y; y++)  {
+                    int y_min = -y << mi_ctx->log2_mv_precission;
+                    int y_max = (height - y - 1) << mi_ctx->log2_mv_precission;
+                    for (x = start_x; x < end_x; x++) {
+                        int x_min = -x << mi_ctx->log2_mv_precission;
+                        int x_max = (width - x - 1) << mi_ctx->log2_mv_precission;
+                        Pixel *pixel = &mi_ctx->pixels[x + y * width];
+
+                        if (pixel->nb + 1 >= NB_PIXEL_MVS) //FIXME discard the vector of lowest weight
+                            continue;
+
+                    #if VSBMC_T1
+                        PIXEL_INIT(255, mv_x, mv_y);
+                    #else
+                        PIXEL_INIT(1, mv_x, mv_y);
+                    #endif
+
+                    }
+                }
+            }
+        }
+}
 
 static void adaptive_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, int alpha)
 {
@@ -375,8 +1049,8 @@ static void adaptive_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, i
     int nb_x, nb_y;
     uint64_t sbad;
 
-    int mv_x = block->mv[0][0] * 2;
-    int mv_y = block->mv[0][1] * 2;
+    int mv_x = block->mvs[0][0] * 2;
+    int mv_y = block->mvs[0][1] * 2;
     int start_x, start_y;
     int startc_x, startc_y, endc_x, endc_y;
 
@@ -444,7 +1118,7 @@ static void adaptive_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, i
 
             if (nb_x || nb_y) {
                 nb = &mi_ctx->int_blocks[mb_x + nb_x + (mb_y + nb_y) * mi_ctx->b_width];
-                sbad = get_sbad(mi_ctx, mi_ctx->mb_size, (mb_x + nb_x) << mi_ctx->log2_mb_size, (mb_y + nb_y) << mi_ctx->log2_mb_size, block->mv[0][0], block->mv[0][1]);
+                sbad = get_sbad(mi_ctx, mi_ctx->mb_size, (mb_x + nb_x) << mi_ctx->log2_mb_size, (mb_y + nb_y) << mi_ctx->log2_mb_size, block->mvs[0][0], block->mvs[0][1]);
                 if (sbad && sbad != UINT64_MAX && nb->sbad != UINT64_MAX) {
                     int phi = av_clip(ALPHA_MAX * nb->sbad / sbad, 0, ALPHA_MAX);
                     obmc_weight = obmc_weight * phi / ALPHA_MAX;
@@ -457,183 +1131,7 @@ static void adaptive_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, i
     }
 }
 
-static void var_size_bmc(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int n, int alpha)
-{
-    int sb_x, sb_y;
-    int width = mi_ctx->frames[0].avf->width;
-    int height = mi_ctx->frames[0].avf->height;
-
-    for (sb_y = 0; sb_y < 2; sb_y++)
-        for (sb_x = 0; sb_x < 2; sb_x++) {
-            Block *sb = &block->subs[sb_x + sb_y * 2];
-
-            if (sb->sb)
-                var_size_bmc(mi_ctx, sb, x_mb + (sb_x << (n - 1)), y_mb + (sb_y << (n - 1)), n - 1, alpha);
-            else {
-                int x, y;
-                int mv_x = sb->mv[0][0] * 2;
-                int mv_y = sb->mv[0][1] * 2;
-
-                int start_x = x_mb + (sb_x << (n - 1));
-                int start_y = y_mb + (sb_y << (n - 1));
-                int end_x = start_x + (1 << (n - 1));
-                int end_y = start_y + (1 << (n - 1));
-
-                for (y = start_y; y < end_y; y++)  {
-                    int y_min = -y << mi_ctx->log2_mv_precission;
-                    int y_max = (height - y - 1) << mi_ctx->log2_mv_precission;
-                    for (x = start_x; x < end_x; x++) {
-                        int x_min = -x << mi_ctx->log2_mv_precission;
-                        int x_max = (width - x - 1) << mi_ctx->log2_mv_precission;
-                        Pixel *pixel = &mi_ctx->pixels[x + y * width];
-
-                        if (pixel->nb + 1 >= NB_PIXEL_MVS) //FIXME discard the vector of lowest weight
-                            continue;
-
-                    #if VSBMC_T1
-                        PIXEL_INIT(255, mv_x, mv_y);
-                    #else
-                        PIXEL_INIT(1, mv_x, mv_y);
-                    #endif
-
-                    }
-                }
-            }
-        }
-}
-
-static void obmc(MIContext *mi_ctx, int alpha)
-{
-    int x, y;
-    int width = mi_ctx->frames[0].avf->width;
-    int height = mi_ctx->frames[0].avf->height;
-    int mb_y, mb_x, dir;
-
-    /*for (y = 0; y < height; y++)
-        for (x = 0; x < width; x++) {
-            Pixel *p = &mi_ctx->pixels[x + y * width];
-            p->weight[0] = ALPHA_MAX - alpha;
-            p->ref[0] = 1;
-            p->mv[0][0] = 0;
-            p->mv[0][1] = 0;
-            p->weight[1] = alpha;
-            p->ref[1] = 2;
-            p->mv[1][0] = 0;
-            p->mv[1][1] = 0;
-            p->nb = 2;
-            // p->nb = 0; // no blending / filling
-        }
-    */
-
-    for (y = 0; y < height; y++)
-        for (x = 0; x < width; x++)
-            mi_ctx->pixels[x + y * width].nb = 0;
-
-    // no need, each block will have vector, atleast in ESA
-    //if (mi_ctx->b_height * mi_ctx->b_width * 5 / 8 > nomv)
-    for (dir = 0; dir < 2; dir++)
-        for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-            for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-                int mv_x = mi_ctx->frames[2 - dir].blocks[mb_x + mb_y * mi_ctx->b_width].mv[dir][0];
-                int mv_y = mi_ctx->frames[2 - dir].blocks[mb_x + mb_y * mi_ctx->b_width].mv[dir][1];
-                int start_x, start_y;
-                int startc_x, startc_y, endc_x, endc_y;
-
-                if (get_roughness(mi_ctx, mb_x, mb_y, mv_x, mv_y, dir) > ROUGHNESS << mi_ctx->log2_mv_precission)
-                    continue;
-
-                start_x = (mb_x << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2;
-                start_y = (mb_y << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2;
-
-                startc_x = av_clip(start_x, 0, width - 1);
-                startc_y = av_clip(start_y, 0, height - 1);
-                endc_x = av_clip(start_x + (2 << mi_ctx->log2_mb_size), 0, width - 1);
-                endc_y = av_clip(start_y + (2 << mi_ctx->log2_mb_size), 0, height - 1);
-
-                if (dir) {
-                    mv_x = -mv_x;
-                    mv_y = -mv_y;
-                }
-
-                for (y = startc_y; y < endc_y; y++) {
-                    int y_min = -y << mi_ctx->log2_mv_precission;
-                    int y_max = (height - y - 1) << mi_ctx->log2_mv_precission;
-                    for (x = startc_x; x < endc_x; x++) {
-                        int x_min = -x << mi_ctx->log2_mv_precission;
-                        int x_max = (width - x - 1) << mi_ctx->log2_mv_precission;
-                        int obmc_weight = obmc_tab_linear[4 - mi_ctx->log2_mb_size][(x - start_x) + ((y - start_y) << (mi_ctx->log2_mb_size + 1))];
-                        Pixel *pixel = &mi_ctx->pixels[x + y * width];
-
-                        if (pixel->nb + 1 >= NB_PIXEL_MVS) //FIXME discrad the vector of lowest weight
-                            continue;
-
-                        PIXEL_INIT(obmc_weight, mv_x, mv_y);
-                    }
-                }
-            }
-}
-
-static void interpolate_pixels(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
-{
-    int x, y, plane;
-
-    for (plane = 0; plane < mi_ctx->nb_planes; plane++) {
-        int width = avf_out->width;
-        int height = avf_out->height;
-
-        if (plane == 1 || plane == 2) {
-            width = mi_ctx->chroma_width;
-            height = mi_ctx->chroma_height;
-        }
-
-        for (y = 0; y < height; y++)
-            for (x = 0; x < width; x++) {
-                int i;
-                int weight_sum = 0;
-                int v = 0;
-                Pixel *pixel;
-                if (plane == 1 || plane == 2) //FIXME optimize
-                    pixel = &mi_ctx->pixels[(x << mi_ctx->chroma_h_shift) + (y << mi_ctx->chroma_v_shift) * avf_out->width];
-                else
-                    pixel = &mi_ctx->pixels[x + y * avf_out->width];
-
-                //FIXME optimize
-                for (i = 0; i < pixel->nb; i++)
-                    weight_sum += pixel->weight[i];
-
-                if (!weight_sum || !pixel->nb) {
-                    pixel->weight[0] = ALPHA_MAX - alpha;
-                    pixel->ref[0] = 1;
-                    pixel->mv[0][0] = 0;
-                    pixel->mv[0][1] = 0;
-                    pixel->weight[1] = alpha;
-                    pixel->ref[1] = 2;
-                    pixel->mv[1][0] = 0;
-                    pixel->mv[1][1] = 0;
-                    pixel->nb = 2;
-
-                    weight_sum = ALPHA_MAX;
-                }
-
-                for (i = 0; i < pixel->nb; i++) {
-                    int is_chroma = plane == 1 || plane == 2; //FIXME
-                    int x_mv = x + (pixel->mv[i][0] >> (mi_ctx->log2_mv_precission + is_chroma));
-                    int y_mv = y + (pixel->mv[i][1] >> (mi_ctx->log2_mv_precission + is_chroma));
-                    Frame *frame = &mi_ctx->frames[pixel->ref[i]];
-
-                    av_assert0(x_mv >= 0 && x_mv < mi_ctx->frames[0].avf->width);
-                    av_assert0(y_mv >= 0 && y_mv < mi_ctx->frames[0].avf->height);
-
-                    v += pixel->weight[i] * frame->avf->data[plane][x_mv + y_mv * frame->avf->linesize[plane]];
-                }
-
-                avf_out->data[plane][x + y * avf_out->linesize[plane]] = ROUNDED_DIV(v, weight_sum);
-            }
-    }
-}
-
 static int cls;
-static int cls_max;
 static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -743,17 +1241,17 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
 
                     if (flag) {
                     //if (block->cid == cls) {
-                        //av_log(0, 0, "eligible: dx: %d, dy: %d\n", block->mv[0][0], block->mv[0][1]);
+                        //av_log(0, 0, "eligible: dx: %d, dy: %d\n", block->mvs[0][0], block->mvs[0][1]);
                         for (y = mb_y * mi_ctx->mb_size; y < (mb_y + 1) * mi_ctx->mb_size; y++)
                             for (x = mb_x * mi_ctx->mb_size; x < (mb_x + 1) * mi_ctx->mb_size; x++) {
-                                avf_out->data[0][x + y * avf_out->linesize[0]] += 20;//FFMIN(255, FFABS(block->mv[0][0]) + FFABS(block->mv[0][1]));
+                                avf_out->data[0][x + y * avf_out->linesize[0]] += 20;//FFMIN(255, FFABS(block->mvs[0][0]) + FFABS(block->mvs[0][1]));
                                 //avf_out->data[0][x + y * avf_out->linesize[0]] += 20;
                             }
                     }
                     else {
                         //set MVs to 0
-                        block->mv[0][0] = 0;
-                        block->mv[0][1] = 0;
+                        block->mvs[0][0] = 0;
+                        block->mvs[0][1] = 0;
                     }
                 #else
                     if (block->cid > 0) {
@@ -765,16 +1263,16 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                                 } else {
                                     int ins = block->cid % 5;
                                     //avf_out->data[0][x + y * avf_out->linesize[0]] /= (ins < 2 ? 2 : ins);
-                                    block->mv[0][0] = 0;
-                                    block->mv[0][1] = 0;
+                                    block->mvs[0][0] = 0;
+                                    block->mvs[0][1] = 0;
                                 }
                             }
-                        //block->mv[0][0] = 0;
-                        //block->mv[0][1] = 0;
+                        //block->mvs[0][0] = 0;
+                        //block->mvs[0][1] = 0;
                     } else {
                         //set MVs to 0
-                        block->mv[0][0] = 0;
-                        block->mv[0][1] = 0;
+                        block->mvs[0][0] = 0;
+                        block->mvs[0][1] = 0;
                     }
                 #endif
                 }
@@ -803,7 +1301,7 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                 for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
                     Block *block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
 
-                    if (get_roughness(mi_ctx, mb_x, mb_y, block->mv[0][0], block->mv[0][1], -1) > ROUGHNESS << mi_ctx->log2_mv_precission)
+                    if (get_roughness(mi_ctx, mb_x, mb_y, block->mvs[0][0], block->mvs[0][1], -1) > ROUGHNESS << mi_ctx->log2_mv_precission)
                         continue;
 
                     if (block->sb)
@@ -837,8 +1335,8 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                                 mv->source = -1;
                                 mv->w = mb_size;
                                 mv->h = mb_size;
-                                mv->src_x = mb_size / 2 * (x ? 3 : 1) + (mb_x << mi_ctx->log2_mb_size) + block->subs[x + y * 2].mv[0][0] * 2;
-                                mv->src_y = mb_size / 2 * (y ? 3 : 1) + (mb_y << mi_ctx->log2_mb_size) + block->subs[x + y * 2].mv[0][1] * 2;
+                                mv->src_x = mb_size / 2 * (x ? 3 : 1) + (mb_x << mi_ctx->log2_mb_size) + block->subs[x + y * 2].mvs[0][0] * 2;
+                                mv->src_y = mb_size / 2 * (y ? 3 : 1) + (mb_y << mi_ctx->log2_mb_size) + block->subs[x + y * 2].mvs[0][1] * 2;
                                 mv->dst_x = mb_size / 2 * (x ? 3 : 1) + (mb_x << mi_ctx->log2_mb_size);
                                 mv->dst_y = mb_size / 2 * (y ? 3 : 1) + (mb_y << mi_ctx->log2_mb_size);
                                 mv++;
@@ -848,8 +1346,8 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                         mv->source = -1;
                         mv->w = mi_ctx->mb_size;
                         mv->h = mi_ctx->mb_size;
-                        mv->src_x = mi_ctx->mb_size / 2 + (mb_x << mi_ctx->log2_mb_size) + block->mv[0][0] * 2;
-                        mv->src_y = mi_ctx->mb_size / 2 + (mb_y << mi_ctx->log2_mb_size) + block->mv[0][1] * 2;
+                        mv->src_x = mi_ctx->mb_size / 2 + (mb_x << mi_ctx->log2_mb_size) + block->mvs[0][0] * 2;
+                        mv->src_y = mi_ctx->mb_size / 2 + (mb_y << mi_ctx->log2_mb_size) + block->mvs[0][1] * 2;
                         mv->dst_x = mi_ctx->mb_size / 2 + (mb_x << mi_ctx->log2_mb_size);
                         mv->dst_y = mi_ctx->mb_size / 2 + (mb_y << mi_ctx->log2_mb_size);
                         mv++;
@@ -871,639 +1369,6 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
         }
             break;
     }
-}
-
-#define MIN_VECTOR(dx0, dy0, dx1, dy1)\
-do {\
-    if (dx1 * dx1 + dy1 * dy1 < dx0 * dx0 + dy0 * dy0) {\
-        dx0 = dx1;\
-        dy0 = dy1;\
-    }\
-} while(0)
-
-typedef uint64_t (*CostFunc)(MIContext *, int, int, int, int, int);
-static uint64_t get_sbad(MIContext *mi_ctx, int mb_size, int x, int y, int mv_x, int mv_y)
-{
-    uint8_t *buf_prev = mi_ctx->frames[1].avf->data[0];
-    uint8_t *buf_next = mi_ctx->frames[2].avf->data[0];
-    int linesize = mi_ctx->frames[0].avf->linesize[0];
-    int64_t sbad = 0;
-    int i, j;
-
-    buf_prev += (y + mv_y) * linesize;
-    buf_next += (y - mv_y) * linesize;
-
-    av_assert0(linesize == mi_ctx->frames[2].avf->linesize[0]); //TEST
-
-    //re-clip again since it's bilateral
-    if (x - FFABS(mv_x) < 0 || y - FFABS(mv_y) < 0 ||
-        x + FFABS(mv_x) + mb_size > mi_ctx->frames[0].avf->width - 1 ||
-        y + FFABS(mv_y) + mb_size > mi_ctx->frames[0].avf->height - 1)
-        return UINT64_MAX; //TODO do one directional ME.
-
-    for (j = 0; j < mb_size; j++)
-        for (i = 0; i < mb_size; i++)
-            sbad += FFABS(buf_prev[x + mv_x + i + j * linesize] - buf_next[x - mv_x + i + j * linesize]);
-
-    return sbad;
-}
-
-#define SBAD_WEIGHT 0.4
-#define INTPOL_PX(px, py, mvx, mvy) ((buf_prev[px + mvx + (py + mvy) * linesize] + buf_next[px - mvx + (py - mvy) * linesize]) / 2)
-
-static uint64_t get_sbad_smd(MIContext *mi_ctx, int mb_size, int x, int y, int mv_x, int mv_y)
-{
-    uint8_t *buf_prev = mi_ctx->frames[1].avf->data[0];
-    uint8_t *buf_next = mi_ctx->frames[2].avf->data[0];
-    int linesize = mi_ctx->frames[0].avf->linesize[0];
-    int64_t sbad = get_sbad(mi_ctx, mb_size, x, y, mv_x, mv_y), smd = 0;
-    int i, nb_bpx = 0;
-    int mb_x, mb_y;
-    Block *nb;
-
-    mb_x = AV_CEIL_RSHIFT(x, mi_ctx->log2_mb_size);
-    mb_y = AV_CEIL_RSHIFT(y, mi_ctx->log2_mb_size);
-
-    nb = &mi_ctx->int_blocks[mb_x + (mb_y - 1) * mi_ctx->b_width];
-    if (nb->hasmv)
-        for (i = x; i < x + mb_size; i++) {
-            smd += FFABS(INTPOL_PX(i, y, mv_x, mv_y) - INTPOL_PX(i, y - 1, nb->mv[0][0], nb->mv[0][1]));
-            nb_bpx++;
-        }
-
-    nb = &mi_ctx->int_blocks[mb_x + (mb_y + 1) * mi_ctx->b_width];
-    if (nb->hasmv)
-        for (i = x; i < x + mb_size; i++) {
-            smd += FFABS(INTPOL_PX(i, y + mb_size - 1, mv_x, mv_y) - INTPOL_PX(i, y + mb_size, nb->mv[0][0], nb->mv[0][1]));
-            nb_bpx++;
-        }
-
-    nb = &mi_ctx->int_blocks[mb_x - 1 + mb_y * mi_ctx->b_width];
-    if (nb->hasmv)
-        for (i = y; i < y + mb_size; i++) {
-            smd += FFABS(INTPOL_PX(x, i, mv_x, mv_y) - INTPOL_PX(x - 1, i, nb->mv[0][0], nb->mv[0][1]));
-            nb_bpx++;
-        }
-
-    nb = &mi_ctx->int_blocks[mb_x + 1 + mb_y * mi_ctx->b_width];
-    if (nb->hasmv)
-        for (i = y; i < y + mb_size; i++) {
-            smd += FFABS(INTPOL_PX(x + mb_size - 1, i, mv_x, mv_y) - INTPOL_PX(x + mb_size, i, nb->mv[0][0], nb->mv[0][1]));
-            nb_bpx++;
-        }
-
-    return SBAD_WEIGHT * sbad + (1 - SBAD_WEIGHT) * smd / nb_bpx;
-}
-
-static uint64_t search_mv_dia(MIContext *mi_ctx, CostFunc get_cost, int mb_size, int x_mb, int y_mb, int *dx, int *dy)
-{
-    int x, y;
-    int x_orig = x_mb, y_orig = y_mb;
-    int start_x, start_y, end_x, end_y;
-    int step = 2;
-    int x_min_cost = x_orig, y_min_cost = y_orig;
-    uint64_t cost, cost_min;
-
-    if (!(cost_min = get_cost(mi_ctx, mb_size, x_mb, y_mb, 0, 0)))
-        return cost_min;
-
-    do {
-        start_x = av_clip(x_orig - step, 0, x_orig);
-        start_y = av_clip(y_orig - step, 0, y_orig);
-        end_x = av_clip(x_orig + step + 1, 0, mi_ctx->frames[0].avf->width - mi_ctx->mb_size);
-        end_y = av_clip(y_orig + step + 1, 0, mi_ctx->frames[0].avf->height - mi_ctx->mb_size);
-
-        for (y = start_y; y < end_y; y += step) {
-            for (x = start_x; x < end_x; x += step) {
-
-                // skips already checked current origin
-                if (x == x_orig && y == y_orig)
-                    continue;
-
-                if (FFABS(x_orig - x) + FFABS(y_orig - y) != step)
-                    continue;
-
-                cost = get_cost(mi_ctx, mb_size, x_mb, y_mb, x - x_mb, y - y_mb);
-                if (!cost) {
-                    *dx = x - x_mb;
-                    *dy = y - y_mb;
-                    return cost_min;
-                } else if (cost < cost_min) {
-                    cost_min = cost;
-                    x_min_cost = x;
-                    y_min_cost = y;
-                }
-            }
-        }
-
-        if (step == 1)
-            break;
-
-        if (x_min_cost == x_orig && y_min_cost == y_orig ||
-            FFABS(x_min_cost - x_mb) >= mi_ctx->search_param || FFABS(y_min_cost - y_mb) >= mi_ctx->search_param)
-            step = 1;
-        else {
-            //TODO skip repeated
-            x_orig = x_min_cost;
-            y_orig = y_min_cost;
-        }
-
-    } while (step > 0);
-
-    *dx = x_min_cost - x_mb;
-    *dy = y_min_cost - y_mb;
-
-    return cost_min;
-}
-
-static uint64_t search_mv_esa(MIContext *mi_ctx, CostFunc get_cost, int mb_size, int x_mb, int y_mb, int *dx, int *dy)
-{
-    int x, y;
-    int p = mi_ctx->search_param;
-    int start_x = av_clip(x_mb - p, 0, x_mb);
-    int start_y = av_clip(y_mb - p, 0, y_mb);
-    int end_x = av_clip(x_mb + p + 1, 0, mi_ctx->frames[0].avf->width - mb_size);
-    int end_y = av_clip(y_mb + p + 1, 0, mi_ctx->frames[0].avf->height - mb_size);
-    uint64_t cost, cost_min;
-
-    if (!(cost_min = get_cost(mi_ctx, mb_size, x_mb, y_mb, 0, 0))) {
-        *dx = 0;
-        *dy = 0;
-        return cost_min;
-    }
-
-    for (y = start_y; y < end_y; y++)
-        for (x = start_x; x < end_x; x++) {
-            if ((cost = get_cost(mi_ctx, mb_size, x_mb, y_mb, x - x_mb, y - y_mb)) < cost_min) {
-                cost_min = cost;
-                *dx = x - x_mb;
-                *dy = y - y_mb;
-            } else if (cost == cost_min)
-                MIN_VECTOR(*dx, *dy, x - x_mb, y - y_mb);
-        }
-
-    return cost_min;
-}
-
-static void bilateral_me(MIContext *mi_ctx)
-{
-    Block *block;
-    int mb_x, mb_y, i, j;
-    int mv_x, mv_y;
-    int changed;
-    int count = 0;
-
-    for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-            block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
-
-            block->cid = 0;
-            block->sb = 0;
-            block->hasmv = 0;
-
-            block->mv[0][0] = 0;
-            block->mv[0][1] = 0;
-
-            if (mb_x == 0 || mb_y == 0 || mb_x == mi_ctx->b_width - 1 || mb_y == mi_ctx->b_height - 1)
-                block->hasmv = 1;
-
-        #if CACHE_MVS
-            int mb_i = mb_x + mb_y * mi_ctx->b_width;
-            mv_x = (mi_ctx->frames[2].blocks[mb_i].mv[0][0] - mi_ctx->frames[1].blocks[mb_i].mv[1][0]) / 4;
-            mv_y = (mi_ctx->frames[2].blocks[mb_i].mv[0][1] - mi_ctx->frames[1].blocks[mb_i].mv[1][1]) / 4;
-            block->mv[0][0] = mv_x;
-            block->mv[0][1] = mv_y;
-        #endif
-        }
-
-#if !CACHE_MVS
-    do {
-        changed = 0;
-        if (++count > 10) {
-            av_log(0, 0, "iteration limit reached\n");
-            break;
-        }
-
-        for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-            for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-                block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
-
-                mv_x = 0; mv_y = 0;
-
-                if (mb_x != 0 && mb_y != 0 && mb_x != mi_ctx->b_width - 1 && mb_y != mi_ctx->b_height - 1) {
-                    search_mv_esa(mi_ctx, &get_sbad_smd, mi_ctx->mb_size,
-                                  mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, &mv_x, &mv_y);
-                    if (block->hasmv && (block->mv[0][0] != mv_x || block->mv[0][1] != mv_y)) {
-                        //if (block->mv[0][0] && block->mv[0][1]) av_log(0, 0, "block: (%d, %d), old: (%d, %d), new: (%d, %d)\n", mb_x, mb_y, block->mv[0][0], block->mv[0][1], mv_x, mv_y);
-                        changed = 1;
-                    } else
-                        block->hasmv = 1;
-
-                    block->mv[0][0] = mv_x;
-                    block->mv[0][1] = mv_y;
-
-                }
-            }
-
-        if (count == 1)
-            changed = 1;
-
-    } while (changed);
-#endif
-
-    for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-            block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
-
-            mi_ctx->clusters[0].sum[0] += block->mv[0][0];
-            mi_ctx->clusters[0].sum[1] += block->mv[0][1];
-
-        #if ENABLE_AOBMC
-            block->sbad = get_sbad(mi_ctx, mi_ctx->mb_size, mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, block->mv[0][0], block->mv[0][1]);
-        #endif
-        }
-
-    mi_ctx->clusters[0].nb = mi_ctx->b_width * mi_ctx->b_height;
-}
-
-static int var_size_bme(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int n)
-{
-    uint8_t *buf_prev = mi_ctx->frames[1].avf->data[0];
-    uint8_t *buf_next = mi_ctx->frames[2].avf->data[0];
-    int linesize = mi_ctx->frames[0].avf->linesize[0];
-    uint64_t cost_sb, cost_old = 0;
-    int mv_x, mv_y, i, j;
-    int x, y;
-    int ret;
-
-    mv_x = block->mv[0][0];
-    mv_y = block->mv[0][1];
-
-    buf_prev += (y_mb + mv_y) * linesize;
-    buf_next += (y_mb - mv_y) * linesize;
-
-    av_assert0(y_mb - FFABS(mv_y) >= 0 && y_mb + FFABS(mv_y) < mi_ctx->frames[0].avf->height);
-    av_assert0(x_mb - FFABS(mv_x) >= 0 && x_mb - FFABS(mv_x) < mi_ctx->frames[0].avf->width);
-
-    for (j = 0; j < 1 << n; j++)
-        for (i = 0; i < 1 << n; i++)
-            cost_old += FFABS(buf_prev[x_mb + mv_x + i + j * linesize] - buf_next[x_mb - mv_x + i + j * linesize]);
-
-    if (!cost_old) {
-        block->sb = 0;
-        return 0;
-    }
-
-    if (!block->subs)
-        block->subs = av_mallocz_array(4, sizeof(Block));
-    if (!block->subs)
-        return AVERROR(ENOMEM);
-
-    block->sb = 1;
-
-    for (y = 0; y < 2; y++)
-        for (x = 0; x < 2; x++) {
-        Block *sb = &block->subs[x + y * 2];
-
-        /* TODO test: since block size can be as low as 2x2, should use MSE instead of MAD for better results? */
-        mv_x = INT_MAX; mv_y = INT_MAX;
-
-        cost_sb = search_mv_esa(mi_ctx, &get_sbad, 1 << (n - 1), x_mb, y_mb, &mv_x, &mv_y);
-        const int T = 4;
-
-        if (mv_x != INT_MAX && mv_y != INT_MAX && /* TODO what if no vector is found? */
-            #if VSBME_T1
-            FFABS(mv_x - block->mv[0][0]) <= T && FFABS(mv_y - block->mv[0][1]) <= T &&
-            #endif
-            cost_sb < cost_old / 4) {
-
-            sb->mv[0][0] = mv_x;
-            sb->mv[0][1] = mv_y;
-            //if (sb->mv[0][0]/2 != block->mv[0][0]/2 || sb->mv[0][1]/2 != block->mv[0][1]/2) av_log(0, 0, "new mv: (%d, %d) vs (%d, %d)\n", sb->mv[0][0], sb->mv[0][1], block->mv[0][0], block->mv[0][1]);
-
-            if (n > 1) {
-                if (ret = var_size_bme(mi_ctx, sb, x_mb + (x << (n - 1)), y_mb + (y << (n - 1)), n - 1))
-                    return ret;
-            } else
-                sb->sb = 0;
-        } else {
-            block->sb = 0;
-            return 0;
-        }
-    }
-
-    return 0;
-}
-
-static int var_size_bme_test(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int n)
-{
-    int mv_x, mv_y, i, j;
-    int x, y;
-    int ret;
-
-    mv_x = block->mv[0][0];
-    mv_y = block->mv[0][1];
-
-
-    if (!block->subs)
-        block->subs = av_mallocz_array(4, sizeof(Block));
-    if (!block->subs)
-        return AVERROR(ENOMEM);
-
-    block->sb = 1;
-
-    for (y = 0; y < 2; y++)
-        for (x = 0; x < 2; x++) {
-        Block *sb = &block->subs[x + y * 2];
-
-        if (1) {
-            sb->mv[0][0] = mv_x;
-            sb->mv[0][1] = mv_y;
-            if (n > 1) {
-                if (ret = var_size_bme_test(mi_ctx, sb, x_mb + (x << (n - 1)), y_mb + (y << (n - 1)), n - 1))
-                    return ret;
-            } else
-                sb->sb = 0;
-        } else {
-            block->sb = 0;
-            return 0;
-        }
-    }
-    return 0;
-}
-
-static int cluster_mvs(MIContext *mi_ctx)
-{
-    int changed, c, c_max = 0;
-    int mb_x, mb_y, x, y;
-    int mv_x, mv_y, avg_x, avg_y, dx, dy;
-    int ret;
-    Block *block;
-    Cluster *cluster, *cluster_new;
-
-    do {
-        changed = 0;
-        for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-            for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-                block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
-                c = block->cid;
-                cluster = &mi_ctx->clusters[c];
-                mv_x = block->mv[0][0];
-                mv_y = block->mv[0][1];
-
-                if (cluster->nb < 2)
-                    continue;
-
-                avg_x = cluster->sum[0] / cluster->nb;
-                avg_y = cluster->sum[1] / cluster->nb;
-                dx = avg_x - mv_x;
-                dy = avg_y - mv_y;
-        #if 0
-                if (FFABS(avg_x + avg_y - FFABS(mv_x) - FFABS(mv_y)) > (CLUSTER_THRESHOLD << mi_ctx->log2_mv_precission)) {
-        #else
-                if (FFABS(avg_x - mv_x) > (CLUSTER_THRESHOLD << mi_ctx->log2_mv_precission) ||
-                    FFABS(avg_y - mv_y) > (CLUSTER_THRESHOLD << mi_ctx->log2_mv_precission)) {
-        #endif
-
-                    int d; //TODO
-                    for (d = 1; d < 5; d++)
-                    for (y = FFMAX(mb_y - d, 0); y < FFMIN(mb_y + d + 1, mi_ctx->b_height); y++)
-                        for (x = FFMAX(mb_x - d, 0); x < FFMIN(mb_x + d + 1, mi_ctx->b_width); x++) {
-                            Block *b = &mi_ctx->int_blocks[x + y * mi_ctx->b_width];
-                            //if ((x - mb_x) && (y - mb_y))
-                            //    continue;
-                            if (b->cid > c) {
-                                c = b->cid;
-                                goto break1;
-                            }
-                        }
-
-                    break1:
-
-                    if (c == block->cid)
-                        c = c_max + 1;
-
-                    if (c >= NB_CLUSTERS) {
-                        av_log(0, 0, "Out of memory!\n");
-                        continue;
-                    }
-
-                    cluster_new = &mi_ctx->clusters[c];
-                    cluster_new->sum[0] += mv_x;
-                    cluster_new->sum[1] += mv_y;
-                    cluster->sum[0] -= mv_x;
-                    cluster->sum[1] -= mv_y;
-                    cluster_new->nb++;
-                    cluster->nb--;
-
-                    c_max = FFMAX(c_max, c);
-                    cls_max = c_max;
-                    block->cid = c;
-
-                    changed = 1;
-                }
-            }
-    } while (changed);
-
-    /* find boundaries */
-    for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-            block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
-            for (y = FFMAX(mb_y - 1, 0); y < FFMIN(mb_y + 2, mi_ctx->b_height); y++)
-                for (x = FFMAX(mb_x - 1, 0); x < FFMIN(mb_x + 2, mi_ctx->b_width); x++) {
-                    dx = x - mb_x;
-                    dy = y - mb_y;
-
-                    if ((x - mb_x) && (y - mb_y) || !dx && !dy)
-                        continue;
-
-                    if (!mb_x || !mb_y || mb_x == mi_ctx->b_width - 1 || mb_y == mi_ctx->b_height - 1)
-                        continue; //TODO test if frame boundaries don't introduce artifacts
-
-                    //if (mi_ctx->int_blocks[x + y * mi_ctx->b_width].cid == 0) {
-                    if (block->cid != mi_ctx->int_blocks[x + y * mi_ctx->b_width].cid) {
-                        if (!dx && block->cid == mi_ctx->int_blocks[x + (mb_y - dy) * mi_ctx->b_width].cid ||
-                            !dy && block->cid == mi_ctx->int_blocks[(mb_x - dx) + y * mi_ctx->b_width].cid) {
-                            if (ret = var_size_bme(mi_ctx, block, mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, mi_ctx->log2_mb_size))
-                                return ret;
-                        }
-                    }
-                }
-        }
-
-    return 0;
-}
-
-/* mvs caching -starts- */
-const char *dir = "/Users/dsm/ffmpeg_cache/bbb_720p_30fps/small/frame_";
-static char *ntos(int64_t num, int size)
-{
-    int i; int l;
-    char *s;
-
-    s = av_malloc(size + 1);
-    s[size] = '\0';
-    for (i =0; i < size; i++) {
-        l = num % 10;
-        s[size - 1 - i] = (char) (l + '0');
-        num /= 10;
-    }
-    return s;
-}
-static int len(int64_t num)
-{
-    int i = 0;
-    while (num) {
-        num = num / 10;
-        i++;
-    }
-    return i;
-}
-static char *get_filename(AVFrame *frame)
-{
-    int64_t pts = frame->pts;
-    char *s = ntos(pts, len(pts));
-    char *filename = av_malloc(strlen(dir) + strlen(s) + 1);
-    strcpy(filename, dir);
-    strcat(filename, s);
-    av_freep(&s);
-    return filename;
-}
-static size_t file_size(char *filename)
-{
-    FILE *file;
-    size_t size = 0;
-
-    file = fopen(filename, "r");
-    if (file == NULL)
-        return 0;
-    fseek(file, 0, 2);
-    size = ftell(file);
-    fclose(file);
-    return size;
-}
-static void copy_mvs(AVFrame *frame)
-{
-    AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_MOTION_VECTORS);
-
-    if (sd) {
-        char *filename = get_filename(frame);
-
-        FILE *file = fopen(filename, "w");
-        fwrite(sd->data, sizeof(AVMotionVector), sd->size / sizeof(AVMotionVector), file);
-        fclose(file);
-
-        av_freep(&filename);
-    }
-}
-static void read_mvs(MIContext *mi_ctx, Frame *frame)
-{
-    char *filename = get_filename(frame->avf);
-    size_t filesize = file_size(filename);
-
-    if (filesize) {
-        uint8_t *data = av_malloc(filesize);
-
-        FILE *file = fopen(filename, "r");
-        fread(data, sizeof(uint8_t), filesize, file);
-
-        {
-            AVMotionVector *mvs = (AVMotionVector *) data;
-            int i, dir;
-
-            for (i = 0; i < filesize / sizeof(AVMotionVector); i++) {
-                AVMotionVector *mv = &mvs[i];
-                int mb_i, mb_y, mb_x;
-
-                mb_x = av_clip((mv->dst_x /*- mv->w / 2*/) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_width - 1);
-                mb_y = av_clip((mv->dst_y /*- mv->h / 2*/) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_height - 1);
-
-                dir = mv->source > 0;
-                mb_i = mb_x + mi_ctx->b_width * mb_y; //TODO subblocks from export_mvs
-
-                frame->blocks[mb_i].mv[dir][0] = (mv->src_x - mv->dst_x) << mi_ctx->log2_mv_precission; //TODO qpel
-                frame->blocks[mb_i].mv[dir][1] = (mv->src_y - mv->dst_y) << mi_ctx->log2_mv_precission;
-
-            }
-        }
-        fclose(file);
-        av_freep(&data);
-    }
-    av_freep(&filename);
-}
-/* mvs caching -ends- */
-
-static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
-{
-    AVFilterContext *ctx = inlink->dst;
-    MIContext *mi_ctx = ctx->priv;
-    Frame frame_tmp, *frame;
-    int i, dir, ret;
-
-    av_frame_free(&mi_ctx->frames[0].avf);
-    frame_tmp = mi_ctx->frames[0];
-    memmove(&mi_ctx->frames[0], &mi_ctx->frames[1], sizeof(mi_ctx->frames[0]) * (NB_FRAMES - 1));
-    mi_ctx->frames[NB_FRAMES - 1] = frame_tmp;
-    mi_ctx->frames[NB_FRAMES - 1].avf = avf_in;
-    frame = &mi_ctx->frames[NB_FRAMES - 1];
-
-    if (mi_ctx->mi_mode == MI_MODE_OBMC) {
-        /* keeping this for later use (optimization with exported motion vectors) */
-        AVFrameSideData *sd = av_frame_get_side_data(frame->avf, AV_FRAME_DATA_MOTION_VECTORS);
-
-        for (i = 0; i < mi_ctx->b_height * mi_ctx->b_width; i++)
-            for (dir = 0; dir < 2; dir++) {
-                frame->blocks[i].mv[dir][0] = 0;
-                frame->blocks[i].mv[dir][1] = 0;
-            }
-
-        if (sd) {
-            AVMotionVector *mvs = (AVMotionVector *) sd->data;
-
-            for (i = 0; i < sd->size / sizeof(AVMotionVector); i++) {
-                AVMotionVector *mv = &mvs[i];
-                int mb_i, mb_y, mb_x;
-
-                mb_x = av_clip((mv->dst_x /*- mv->w / 2*/) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_width - 1);
-                mb_y = av_clip((mv->dst_y /*- mv->h / 2*/) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_height - 1);
-
-                dir = mv->source > 0;
-                mb_i = mb_x + mi_ctx->b_width * mb_y; //TODO subblocks from export_mvs
-
-                frame->blocks[mb_i].mv[dir][0] = (mv->src_x - mv->dst_x) << mi_ctx->log2_mv_precission; //TODO qpel
-                frame->blocks[mb_i].mv[dir][1] = (mv->src_y - mv->dst_y) << mi_ctx->log2_mv_precission;
-
-            }
-        }
-    }
-
-#if CACHE_MVS
-    /* save mvs to disk, if available */
-    copy_mvs(frame->avf);
-    read_mvs(mi_ctx, frame);
-#endif
-
-    if (mi_ctx->mi_mode == MI_MODE_PAPER2) {
-
-        if (!mi_ctx->frames[0].avf)
-            return 0;
-
-        // reset clusters
-        for (i = 0; i < NB_CLUSTERS; i++) {
-            mi_ctx->clusters[i].sum[0] = 0;
-            mi_ctx->clusters[i].sum[1] = 0;
-            mi_ctx->clusters[i].nb = 0;
-        }
-
-        bilateral_me(mi_ctx);
-
-    #if ENABLE_CLUSTERING
-        if (ret = cluster_mvs(mi_ctx))
-            return ret;
-    #endif
-    }
-
-    return 0;
 }
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *avf_in)
@@ -1607,3 +1472,105 @@ AVFilter ff_vf_minterpolate = {
     .inputs        = minterpolate_inputs,
     .outputs       = minterpolate_outputs,
 };
+
+/* motion vector caching */
+static char *ntos(int64_t num, int size)
+{
+    int i; int l;
+    char *s;
+
+    s = av_malloc(size + 1);
+    s[size] = '\0';
+    for (i =0; i < size; i++) {
+        l = num % 10;
+        s[size - 1 - i] = (char) (l + '0');
+        num /= 10;
+    }
+    return s;
+}
+
+static int len(int64_t num)
+{
+    int i = 0;
+    while (num) {
+        num = num / 10;
+        i++;
+    }
+    return i;
+}
+
+static char *get_filename(AVFrame *frame)
+{
+    int64_t pts = frame->pts;
+    char *s = ntos(pts, len(pts));
+    char *filename = av_malloc(strlen(dir) + strlen(s) + 1);
+    strcpy(filename, dir);
+    strcat(filename, s);
+    av_freep(&s);
+    return filename;
+}
+
+static size_t file_size(char *filename)
+{
+    FILE *file;
+    size_t size = 0;
+
+    file = fopen(filename, "r");
+    if (file == NULL)
+        return 0;
+    fseek(file, 0, 2);
+    size = ftell(file);
+    fclose(file);
+    return size;
+}
+
+static void copy_mvs(AVFrame *frame)
+{
+    AVFrameSideData *sd = av_frame_get_side_data(frame, AV_FRAME_DATA_MOTION_VECTORS);
+
+    if (sd) {
+        char *filename = get_filename(frame);
+
+        FILE *file = fopen(filename, "w");
+        fwrite(sd->data, sizeof(AVMotionVector), sd->size / sizeof(AVMotionVector), file);
+        fclose(file);
+
+        av_freep(&filename);
+    }
+}
+
+static void read_mvs(MIContext *mi_ctx, Frame *frame)
+{
+    char *filename = get_filename(frame->avf);
+    size_t filesize = file_size(filename);
+
+    if (filesize) {
+        uint8_t *data = av_malloc(filesize);
+
+        FILE *file = fopen(filename, "r");
+        fread(data, sizeof(uint8_t), filesize, file);
+
+        {
+            AVMotionVector *mvs = (AVMotionVector *) data;
+            int i, dir;
+
+            for (i = 0; i < filesize / sizeof(AVMotionVector); i++) {
+                AVMotionVector *mv = &mvs[i];
+                int mb_i, mb_y, mb_x;
+
+                mb_x = av_clip((mv->dst_x /*- mv->w / 2*/) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_width - 1);
+                mb_y = av_clip((mv->dst_y /*- mv->h / 2*/) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_height - 1);
+
+                dir = mv->source > 0;
+                mb_i = mb_x + mi_ctx->b_width * mb_y; //TODO subblocks from export_mvs
+
+                frame->blocks[mb_i].mvs[dir][0] = (mv->src_x - mv->dst_x) << mi_ctx->log2_mv_precission; //TODO qpel
+                frame->blocks[mb_i].mvs[dir][1] = (mv->src_y - mv->dst_y) << mi_ctx->log2_mv_precission;
+
+            }
+        }
+        fclose(file);
+        av_freep(&data);
+    }
+    av_freep(&filename);
+}
