@@ -27,18 +27,19 @@
 #include "video.h"
 
 //TESTS
-#define ENABLE_CLUSTERING 1
+#define ENABLE_CLUSTERING 0
 #define DEBUG_CLUSTERING 0
 #define CACHE_MVS 0
 #define EXPORT_MVS 0
 #define ENABLE_AOBMC 1
+#define ENABLE_SMD 0
 //
 #define VSBME_T1 1
 #define VSBMC_T1 1
 //
 
 #define NB_FRAMES 4
-#define NB_PIXEL_MVS 20
+#define NB_PIXEL_MVS 16
 #define NB_CLUSTERS 100
 
 #define ALPHA_MAX 1024
@@ -218,6 +219,8 @@ typedef struct MIContext {
 
     Pixel *pixels;
 
+    int cls;
+    int cls_max;
 } MIContext;
 
 #define OFFSET(x) offsetof(MIContext, x)
@@ -314,7 +317,7 @@ static int config_output(AVFilterLink *outlink)
     return 0;
 }
 
-const char *dir = "/Users/dsm/ffmpeg_cache/bbb_720p_30fps/small/frame_";
+const char *dir = "/Users/dsm/ffmpeg_cache/bbb_720p_30fps/small/nosce/frame_";
 static void copy_mvs(AVFrame *);
 static void read_mvs(MIContext *, Frame *);
 
@@ -342,6 +345,29 @@ static uint64_t get_sbad(MIContext *mi_ctx, int mb_size, int x, int y, int mv_x,
     for (j = 0; j < mb_size; j++)
         for (i = 0; i < mb_size; i++)
             sbad += FFABS(buf_prev[x + mv_x + i + j * linesize] - buf_next[x - mv_x + i + j * linesize]);
+
+    return sbad;
+}
+
+static uint64_t get_sbad_ob(MIContext *mi_ctx, int mb_size, int x, int y, int mv_x, int mv_y)
+{
+    uint8_t *buf_prev = mi_ctx->frames[1].avf->data[0];
+    uint8_t *buf_next = mi_ctx->frames[2].avf->data[0];
+    int linesize = mi_ctx->frames[0].avf->linesize[0];
+    int64_t sbad = 0;
+    int i, j;
+
+    av_assert0(linesize == mi_ctx->frames[2].avf->linesize[0]); //TEST
+
+    //re-clip again since it's bilateral
+    if (x - FFABS(mv_x) - mb_size / 2 < 0 || y - FFABS(mv_y) - mb_size / 2 < 0 ||
+        x + FFABS(mv_x) + mb_size * 3 / 2 > mi_ctx->frames[0].avf->width - 1 ||
+        y + FFABS(mv_y) + mb_size * 3 / 2 > mi_ctx->frames[0].avf->height - 1)
+        return UINT64_MAX; //TODO do one directional ME.
+
+    for (j = -mb_size / 2; j < mb_size * 3 / 2; j++)
+        for (i = -mb_size / 2; i < mb_size * 3 / 2; i++)
+            sbad += FFABS(buf_prev[x + mv_x + i + (y + mv_y + j) * linesize] - buf_next[x - mv_x + i + (y - mv_y + j) * linesize]);
 
     return sbad;
 }
@@ -521,6 +547,7 @@ static void bilateral_me(MIContext *mi_ctx)
         }
 
 #if !CACHE_MVS
+#if ENABLE_SMD
     do {
         changed = 0;
         if (++count > 10) {
@@ -553,7 +580,25 @@ static void bilateral_me(MIContext *mi_ctx)
             changed = 1;
 
     } while (changed);
+
+#else
+    for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
+        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
+            block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
+
+            mv_x = 0; mv_y = 0;
+
+            if (mb_x != 0 && mb_y != 0 && mb_x != mi_ctx->b_width - 1 && mb_y != mi_ctx->b_height - 1) {
+                search_mv_esa(mi_ctx, &get_sbad_ob, mi_ctx->mb_size,
+                              mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, &mv_x, &mv_y);
+                block->mvs[0][0] = mv_x;
+                block->mvs[0][1] = mv_y;
+
+            }
+        }
 #endif
+
+#endif /* CACHE_MVS */
 
     for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
         for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
@@ -639,7 +684,6 @@ static int var_size_bme(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int
     return 0;
 }
 
-static int cls_max;
 static int cluster_mvs(MIContext *mi_ctx)
 {
     int changed, c, c_max = 0;
@@ -705,7 +749,7 @@ static int cluster_mvs(MIContext *mi_ctx)
                     cluster->nb--;
 
                     c_max = FFMAX(c_max, c);
-                    cls_max = c_max;
+                    mi_ctx->cls_max = c_max;
                     block->cid = c;
 
                     changed = 1;
@@ -829,6 +873,7 @@ static int get_roughness(MIContext *mi_ctx, int mb_x, int mb_y, int mv_x, int mv
                 if (x == mb_x && y == mb_y)
                     continue;
 
+                mv_x *= 2; mv_y *= 2;
                 mv_x1 = mi_ctx->int_blocks[x + y * mi_ctx->b_width].mvs[0][0] * 2;
                 mv_y1 = mi_ctx->int_blocks[x + y * mi_ctx->b_width].mvs[0][1] * 2;
             } else {
@@ -851,6 +896,9 @@ static int get_roughness(MIContext *mi_ctx, int mb_x, int mb_y, int mv_x, int mv
 
 #define PIXEL_INIT(b_weight, mv_x, mv_y)                                                            \
     do {                                                                                            \
+\
+        av_assert0(pixel->nb + 2 <= NB_PIXEL_MVS); \
+\
         pixel->refs[pixel->nb] = 1;                                                                 \
         pixel->weights[pixel->nb] = b_weight * (ALPHA_MAX - alpha);                                 \
         pixel->mvs[pixel->nb][0] = av_clip((mv_x * alpha) / ALPHA_MAX, x_min, x_max);               \
@@ -925,9 +973,6 @@ static void obmc(MIContext *mi_ctx, int alpha)
                         int x_max = (width - x - 1) << mi_ctx->log2_mv_precission;
                         int obmc_weight = obmc_tab_linear[4 - mi_ctx->log2_mb_size][(x - start_x) + ((y - start_y) << (mi_ctx->log2_mb_size + 1))];
                         Pixel *pixel = &mi_ctx->pixels[x + y * width];
-
-                        if (pixel->nb + 1 >= NB_PIXEL_MVS) //FIXME discrad the vector of lowest weight
-                            continue;
 
                         PIXEL_INIT(obmc_weight, mv_x, mv_y);
                     }
@@ -1024,9 +1069,6 @@ static void var_size_bmc(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, in
                         int x_max = (width - x - 1) << mi_ctx->log2_mv_precission;
                         Pixel *pixel = &mi_ctx->pixels[x + y * width];
 
-                        if (pixel->nb + 1 >= NB_PIXEL_MVS) //FIXME discard the vector of lowest weight
-                            continue;
-
                     #if VSBMC_T1
                         PIXEL_INIT(255, mv_x, mv_y);
                     #else
@@ -1047,12 +1089,18 @@ static void adaptive_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, i
 
     Block *nb;
     int nb_x, nb_y;
-    uint64_t sbad;
+    uint64_t sbads[9]; // for SBAD[B(i,j), v(i + p, j + q)]
 
     int mv_x = block->mvs[0][0] * 2;
     int mv_y = block->mvs[0][1] * 2;
     int start_x, start_y;
     int startc_x, startc_y, endc_x, endc_y;
+
+    for (nb_y = FFMAX(0, mb_y - 1); nb_y < FFMIN(mb_y + 2, mi_ctx->b_height); nb_y++)
+        for (nb_x = FFMAX(0, mb_x - 1); nb_x < FFMIN(mb_x + 2, mi_ctx->b_width); nb_x++)
+            if (nb_x - mb_x || nb_y - mb_y)
+                sbads[nb_x - mb_x + 1 + (nb_y - mb_y + 1) * 3] = get_sbad(mi_ctx, mi_ctx->mb_size, nb_x << mi_ctx->log2_mb_size,
+                                                                          nb_y << mi_ctx->log2_mb_size, block->mvs[0][0], block->mvs[0][1]);
 
     start_x = (mb_x << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2;
     start_y = (mb_y << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2;
@@ -1070,9 +1118,6 @@ static void adaptive_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, i
             int x_max = (width - x - 1) << mi_ctx->log2_mv_precission;
             int obmc_weight = obmc_tab_linear[4 - mi_ctx->log2_mb_size][(x - start_x) + ((y - start_y) << (mi_ctx->log2_mb_size + 1))];
             Pixel *pixel = &mi_ctx->pixels[x + y * width];
-
-            if (pixel->nb + 1 >= NB_PIXEL_MVS) //FIXME discrad the vector of lowest weight
-                continue;
 
     #if ENABLE_AOBMC
         #if 0
@@ -1117,8 +1162,9 @@ static void adaptive_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, i
         #endif
 
             if (nb_x || nb_y) {
+                uint64_t sbad = sbads[nb_x + 1 + (nb_y + 1) * 3];
                 nb = &mi_ctx->int_blocks[mb_x + nb_x + (mb_y + nb_y) * mi_ctx->b_width];
-                sbad = get_sbad(mi_ctx, mi_ctx->mb_size, (mb_x + nb_x) << mi_ctx->log2_mb_size, (mb_y + nb_y) << mi_ctx->log2_mb_size, block->mvs[0][0], block->mvs[0][1]);
+
                 if (sbad && sbad != UINT64_MAX && nb->sbad != UINT64_MAX) {
                     int phi = av_clip(ALPHA_MAX * nb->sbad / sbad, 0, ALPHA_MAX);
                     obmc_weight = obmc_weight * phi / ALPHA_MAX;
@@ -1131,7 +1177,6 @@ static void adaptive_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, i
     }
 }
 
-static int cls;
 static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -1240,7 +1285,7 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                     } //else if (i >= 1 && i < 5) {
 
                     if (flag) {
-                    //if (block->cid == cls) {
+                    //if (block->cid == mi_ctx->cls) {
                         //av_log(0, 0, "eligible: dx: %d, dy: %d\n", block->mvs[0][0], block->mvs[0][1]);
                         for (y = mb_y * mi_ctx->mb_size; y < (mb_y + 1) * mi_ctx->mb_size; y++)
                             for (x = mb_x * mi_ctx->mb_size; x < (mb_x + 1) * mi_ctx->mb_size; x++) {
@@ -1255,7 +1300,7 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                     }
                 #else
                     if (block->cid > 0) {
-                    //if (block->cid == cls) {
+                    //if (block->cid == mi_ctx->cls) {
                         for (y = mb_y * mi_ctx->mb_size; y < (mb_y + 1) * mi_ctx->mb_size; y++)
                             for (x = mb_x * mi_ctx->mb_size; x < (mb_x + 1) * mi_ctx->mb_size; x++) {
                                 if (block->sb) {
@@ -1277,14 +1322,14 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                 #endif
                 }
 
-            cls++;
-            if (cls >= cls_max)
-                cls = 1;
-            for (int c = 0; c < cls_max; c++) {
-                if (mi_ctx->clusters[cls].nb < 2) {
-                    cls++;
-                    if (cls >= cls_max) {
-                        cls = 0;
+            mi_ctx->cls++;
+            if (mi_ctx->cls >= mi_ctx->cls_max)
+                mi_ctx->cls = 1;
+            for (int c = 0; c < mi_ctx->cls_max; c++) {
+                if (mi_ctx->clusters[mi_ctx->cls].nb < 2) {
+                    mi_ctx->cls++;
+                    if (mi_ctx->cls >= mi_ctx->cls_max) {
+                        mi_ctx->cls = 0;
                         break;
                     }
                 }
