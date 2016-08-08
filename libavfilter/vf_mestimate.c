@@ -1,6 +1,5 @@
 /**
- *
- * Developed by Davinder Singh (DSM_ / @dsmudhar) during GSoC 2016
+ * Copyright (C) 2016 Davinder Singh (DSM_) <ds.mudhar<@gmail.com>
  *
  * This file is part of FFmpeg.
  *
@@ -19,6 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include "motion_estimation.h"
+#include "libavcodec/mathops.h"
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
 #include "libavutil/imgutils.h"
@@ -31,54 +32,45 @@
 #include "video.h"
 
 enum MEMethod {
-    ME_METHOD_DIA           = 1,
-    ME_METHOD_ESA           = 2,
-    ME_METHOD_FSS           = 3,
-    ME_METHOD_HEX           = 4,
-    ME_METHOD_NTSS          = 5,
-    ME_METHOD_STAR          = 6,
+    ME_METHOD_DS            = 1,
+    ME_METHOD_EPZS          = 2,
+    ME_METHOD_ESA           = 3,
+    ME_METHOD_FSS           = 4,
+    ME_METHOD_HEXBS         = 5,
+    ME_METHOD_NTSS          = 6,
     ME_METHOD_TDLS          = 7,
     ME_METHOD_TSS           = 8,
     ME_METHOD_UMH           = 9,
 };
 
 typedef struct MEContext {
-    AVFrame *prev, *cur, *next;
-    int mb_size;
-    int search_param;
-    int64_t (*get_cost)(struct MEContext *me_ctx, int x_mb, int y_mb,
-                        int mv_x, int mv_y, int dir);
-    int width;
-    int height;
-} MEContext;
-
-typedef struct MEFilterContext {
     const AVClass *class;
-    MEContext *me_ctx;
+    AVMotionEstContext me_ctx;
     enum MEMethod method;               ///< motion estimation method
 
     int mb_size;                        ///< macroblock size
     int search_param;                   ///< search parameter
-    int b_width, b_height;
+    int b_width, b_height, b_count;
     int log2_mb_size;
 
-    AVMotionVector *mvs;                ///< motion vectors for current frame
-    int32_t mv_count;                   ///< current frame motion vector count
-} MEFilterContext;
+    AVFrame *prev, *cur, *next;
 
-#define OFFSET(x) offsetof(MEFilterContext, x)
+    int (*mv_table[3])[2][2];           ///< motion vectors of current & prev 2 frames
+} MEContext;
+
+#define OFFSET(x) offsetof(MEContext, x)
 #define FLAGS AV_OPT_FLAG_VIDEO_PARAM|AV_OPT_FLAG_FILTERING_PARAM
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption mestimate_options[] = {
-    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = ME_METHOD_ESA}, ME_METHOD_DIA, /*TODO*/ME_METHOD_UMH, FLAGS, "method" },
-        CONST("dia",  "diamond search",              ME_METHOD_DIA,  "method"),
+    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = ME_METHOD_ESA}, ME_METHOD_DS, ME_METHOD_UMH, FLAGS, "method" },
+        CONST("ds",   "diamond search",              ME_METHOD_DS,   "method"),
+        CONST("epzs", "enhanced predictive zonal search",   ME_METHOD_EPZS, "method"),
         CONST("esa",  "exhaustive search",           ME_METHOD_ESA,  "method"),
         CONST("fss",  "four step search",            ME_METHOD_FSS,  "method"),
-        CONST("hex",  "hexagonal search",            ME_METHOD_HEX,  "method"),
+        CONST("hexbs",  "hexagon-based search",       ME_METHOD_HEXBS,  "method"),
         CONST("ntss", "new three step search",       ME_METHOD_NTSS, "method"),
-        CONST("star", "star search",                 ME_METHOD_STAR, "method"),
-        CONST("tdls", "2D logarithmic search",       ME_METHOD_TDLS, "method"),
+        CONST("tdls", "two dimensional logarithmic search", ME_METHOD_TDLS, "method"),
         CONST("tss",  "three step search",           ME_METHOD_TSS,  "method"),
         CONST("umh",  "uneven multi-hexagon search", ME_METHOD_UMH,  "method"),
     { "mb_size", "specify macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 8, INT_MAX, FLAGS },
@@ -109,231 +101,163 @@ static int query_formats(AVFilterContext *ctx)
     return ff_set_common_formats(ctx, fmts_list);
 }
 
-static void init_me_context(MEContext *me_ctx, int width, int height,
-                            int mb_size, int search_param)
+static uint64_t get_sad(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int x_mv, int y_mv)
 {
-    me_ctx->prev = me_ctx->cur = me_ctx->next = NULL;
-    me_ctx->width = width; //XXX how's inlink->w different from frame->width
+    const int linesize = me_ctx->linesize;
+    uint8_t *data_ref = me_ctx->data_ref;
+    uint8_t *data_cur = me_ctx->data_cur;
+    uint64_t sad = 0;
+    int i, j;
+
+    data_ref += y_mv * linesize;
+    data_cur += y_mb * linesize;
+
+    for (j = 0; j < me_ctx->mb_size; j++)
+        for (i = 0; i < me_ctx->mb_size; i++)
+            sad += FFABS(data_ref[x_mv + i + j * linesize] - data_cur[x_mb + i + j * linesize]);
+
+    return sad;
+}
+
+void ff_me_init_context(AVMotionEstContext *me_ctx, int mb_size, int search_param,
+                        int width, int height)
+{
+    me_ctx->width = width;
     me_ctx->height = height;
     me_ctx->mb_size = mb_size;
     me_ctx->search_param = search_param;
+    me_ctx->get_cost = &get_sad;
+    me_ctx->x_max = width - mb_size + 1;
+    me_ctx->y_max = height - mb_size + 1;
 }
 
 static int config_input(AVFilterLink *inlink)
 {
-    MEFilterContext *s = inlink->dst->priv;
-    MEContext *me_ctx;
+    MEContext *s = inlink->dst->priv;
+    int i;
 
-    s->log2_mb_size = ff_log2(s->mb_size); //HACK round off first?
+    s->log2_mb_size = av_ceil_log2_c(s->mb_size);
     s->mb_size = 1 << s->log2_mb_size;
 
-    s->b_width  = AV_CEIL_RSHIFT(inlink->w, s->log2_mb_size);
+    s->b_width  = AV_CEIL_RSHIFT(inlink->w, s->log2_mb_size); //XXX how's inlink->w different from frame->width
     s->b_height = AV_CEIL_RSHIFT(inlink->h, s->log2_mb_size);
+    s->b_count = s->b_width * s->b_height;
 
-    s->mvs = av_malloc_array(s->b_width * s->b_height, 2 * sizeof(AVMotionVector));
-    if (!s->mvs)
-        return AVERROR(ENOMEM);
+    for (i = 0; i < 3; i++) {
+        s->mv_table[i] = av_mallocz_array(s->b_count, sizeof(*s->mv_table[0]));
+        if (!s->mv_table[i])
+            return AVERROR(ENOMEM);
+    }
 
-    me_ctx = av_malloc(sizeof(MEContext));
-    if (!me_ctx)
-        return AVERROR(ENOMEM);
-
-    s->me_ctx = me_ctx;
-    init_me_context(me_ctx, inlink->w, inlink->h, s->mb_size, s->search_param);
+    ff_me_init_context(&s->me_ctx, s->mb_size, s->search_param, inlink->w, inlink->h);
 
     return 0;
 }
 
-static uint64_t get_mad(MEContext *me_ctx, int x_mb, int y_mb, int mv_x, int mv_y, int direction)
-{
-    uint8_t *buf_ref = (direction ? me_ctx->next : me_ctx->prev)->data[0];
-    uint8_t *buf_cur = me_ctx->cur->data[0];
-    int linesize = me_ctx->cur->linesize[0];
-    int64_t mad = 0;
-    int i, j;
-
-    av_assert0(linesize == (direction ? me_ctx->next : me_ctx->prev)->linesize[0]);
-
-    buf_ref += (y_mb + mv_y) * linesize;
-    buf_cur += y_mb * linesize;
-
-    for (j = 0; j < me_ctx->mb_size; j++)
-        for (i = 0; i < me_ctx->mb_size; i++)
-            mad += FFABS(buf_ref[x_mb + mv_x + i + j * linesize] - buf_cur[x_mb + i + j * linesize]);
-
-    return mad;
+#define COST_MV(x, y)\
+{\
+    cost = me_ctx->get_cost(me_ctx, x_mb, y_mb, x, y);\
+    if (cost < cost_min) {\
+        cost_min = cost;\
+        mv[0] = x;\
+        mv[1] = y;\
+    }\
 }
 
-static void search_mv_esa(MEContext *me_ctx, int x_mb, int y_mb, int *mv_x, int *mv_y, int dir)
+#define COST_4_MV(x, y)\
+if (x >= x_min && x <= x_max && y >= y_min && y <= y_max)\
+    COST_MV(x, y)
+
+static void search_mv_esa(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
 {
     int x, y;
-    int p = me_ctx->search_param;
-    int start_x = av_clip(x_mb - p, 0, x_mb);
-    int start_y = av_clip(y_mb - p, 0, y_mb);
-    int end_x = av_clip(x_mb + p + 1, 0, me_ctx->width - me_ctx->mb_size);
-    int end_y = av_clip(y_mb + p + 1, 0, me_ctx->height - me_ctx->mb_size);
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
     uint64_t cost, cost_min;
 
-    if (!(cost_min = get_mad(me_ctx, x_mb, y_mb, 0, 0, dir)))
+    if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
         return;
 
-    for (y = start_y; y < end_y; y++)
-        for (x = start_x; x < end_x; x++) {
-            if ((cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir)) < cost_min) {
-                cost_min = cost;
-                *mv_x = x - x_mb;
-                *mv_y = y - y_mb;
-            } else if (cost == cost_min) {
-                int mv_x1 = x - x_mb;
-                int mv_y1 = y - y_mb;
-                if (mv_x1 * mv_x1 + mv_y1 * mv_y1 < *mv_x * *mv_x + *mv_y * *mv_y) {
-                    *mv_x = mv_x1;
-                    *mv_y = mv_y1;
-                }
-            }
-        }
+    for (y = y_min; y <= y_max; y++)
+        for (x = x_min; x <= x_max; x++)
+            COST_MV(x, y)
 }
 
-static void search_mv_tss(MEContext *me_ctx, int x_mb, int y_mb, int *mv_x, int *mv_y, int dir)
+static void search_mv_tss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
 {
     int x, y;
-    int start_x, start_y, end_x, end_y;
-    int step = ROUNDED_DIV(me_ctx->search_param, 2);
-    int x_min_cost = x_mb, y_min_cost = y_mb;
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
     uint64_t cost, cost_min;
+    int step = ROUNDED_DIV(me_ctx->search_param, 2);
+    int i;
 
-    if (!(cost_min = get_mad(me_ctx, x_mb, y_mb, 0, 0, dir)))
+    int square[8][2] = {{0,-1}, {0,1}, {-1,0}, {1,0}, {-1,-1}, {-1,1}, {1,-1}, {1,1}};
+
+    mv[0] = x_mb;
+    mv[1] = y_mb;
+
+    if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
         return;
 
     do {
-        start_x = av_clip(x_min_cost - step, 0, x_min_cost);
-        start_y = av_clip(y_min_cost - step, 0, y_min_cost);
-        end_x = av_clip(x_min_cost + step + 1, 0, me_ctx->width - me_ctx->mb_size);
-        end_y = av_clip(y_min_cost + step + 1, 0, me_ctx->height - me_ctx->mb_size);
+        x = mv[0];
+        y = mv[1];
 
-        for (y = start_y; y < end_y; y += step) {
-            for (x = start_x; x < end_x; x += step) {
+        for (i = 0; i < 8; i++)
+            COST_4_MV(x + square[i][0] * step, y + square[i][1] * step)
 
-                //if (x == start_x + step && y == start_y + step) //FIXME
-                //    continue;
-
-                cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir);
-                if (!cost) {
-                    *mv_x = x - x_mb;
-                    *mv_y = y - y_mb;
-                    return;
-                } else if (cost < cost_min) {
-                    cost_min = cost;
-                    x_min_cost = x;
-                    y_min_cost = y;
-                }
-            }
-        }
         step = step / 2;
 
     } while (step > 0);
-
-    *mv_x = x_min_cost - x_mb;
-    *mv_y = y_min_cost - y_mb;
 }
 
-static void search_mv_ntss(MEContext *me_ctx, int x_mb, int y_mb, int *mv_x, int *mv_y, int dir)
+static void search_mv_ntss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
 {
     int x, y;
-    int start_x, start_y, end_x, end_y;
-    int step = ROUNDED_DIV(me_ctx->search_param, 2);
-    int x_min_cost = x_mb, y_min_cost = y_mb;
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
     uint64_t cost, cost_min;
+    int step = ROUNDED_DIV(me_ctx->search_param, 2);
     int first_step = 1;
+    int i;
 
-    if (!(cost_min = get_mad(me_ctx, x_mb, y_mb, 0, 0, dir)))
+    int square[8][2] = {{0,-1}, {0,1}, {-1,0}, {1,0}, {-1,-1}, {-1,1}, {1,-1}, {1,1}};
+
+    mv[0] = x_mb;
+    mv[1] = y_mb;
+
+    if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
         return;
 
     do {
-        start_x = av_clip(x_min_cost - step, 0, x_min_cost);
-        start_y = av_clip(y_min_cost - step, 0, y_min_cost);
-        end_x = av_clip(x_min_cost + step + 1, 0, me_ctx->width - me_ctx->mb_size);
-        end_y = av_clip(y_min_cost + step + 1, 0, me_ctx->height - me_ctx->mb_size);
+        x = mv[0];
+        y = mv[1];
 
-        for (y = start_y; y < end_y; y += step) {
-            for (x = start_x; x < end_x; x += step) {
-
-                //if (x == start_x + step && y == start_y + step) //FIXME
-                //    continue;
-
-                cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir);
-                if (cost < cost_min) {
-                    cost_min = cost;
-                    x_min_cost = x;
-                    y_min_cost = y;
-                } else if (!cost && !first_step) {
-                    *mv_x = x - x_mb;
-                    *mv_y = y - y_mb;
-                    return;
-                }
-            }
-        }
+        for (i = 0; i < 8; i++)
+            COST_4_MV(x + square[i][0] * step, y + square[i][1] * step)
 
         // addition to TSS in NTSS
         if (first_step) {
-            int mv_x1, mv_y1;
-            start_x = av_clip(x_mb - 1, 0, x_mb);
-            start_y = av_clip(y_mb - 1, 0, y_mb);
-            end_x = av_clip(x_mb + 2, 0, me_ctx->width - me_ctx->mb_size);
-            end_y = av_clip(y_mb + 2, 0, me_ctx->height - me_ctx->mb_size);
 
-            for (y = start_y; y < end_y; y++) {
-                for (x = start_x; x < end_x; x++) {
+            for (i = 0; i < 8; i++)
+                COST_4_MV(x + square[i][0], y + square[i][1])
 
-                    if (x == x_mb && y == y_mb)
-                        continue;
-
-                    cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir);
-                    if (!cost) {
-                        *mv_x = x - x_mb;
-                        *mv_y = y - y_mb;
-                        return;
-                    } else if (cost < cost_min) {
-                        cost_min = cost;
-                        x_min_cost = x;
-                        y_min_cost = y;
-                    }
-                }
-            }
-
-            mv_x1 = x_min_cost - x_mb;
-            mv_y1 = y_min_cost - y_mb;
-
-            if (!mv_x1 && !mv_y1)
+            if (x == mv[0] && y == mv[1])
                 return;
 
-            if (FFABS(mv_x1) <= 1 && FFABS(mv_y1) <= 1) {
-                int i, j;
-                start_x = x_mb + mv_x1;
-                start_y = y_mb + mv_y1;
-                // no need to clip here, since block size is >= 2
-                for (j = -1; j <= 1; j++) {
-                    y = start_y + j;
-                    for (i = -1; i <= 1; i++) {
-                        if ((1 - i * mv_x1) && (1 - j * mv_y1))
-                            continue;
+            if (FFABS(x - mv[0]) <= 1 && FFABS(y - mv[1]) <= 1) {
+                x = mv[0];
+                y = mv[1];
 
-                        x = start_x + i;
-                        cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir);
-                        if (!cost) {
-                            *mv_x = x - x_mb;
-                            *mv_y = y - y_mb;
-                            return;
-                        } else if (cost < cost_min) {
-                            cost_min = cost;
-                            x_min_cost = x;
-                            y_min_cost = y;
-                        }
-                    }
-                }
-
-                *mv_x = x_min_cost - x_mb;
-                *mv_y = y_min_cost - y_mb;
+                for (i = 0; i < 8; i++)
+                    COST_4_MV(x + square[i][0], y + square[i][1])
                 return;
             }
 
@@ -343,298 +267,494 @@ static void search_mv_ntss(MEContext *me_ctx, int x_mb, int y_mb, int *mv_x, int
         step = step / 2;
 
     } while (step > 0);
-
-    *mv_x = x_min_cost - x_mb;
-    *mv_y = y_min_cost - y_mb;
 }
 
-static void search_mv_tdls(MEContext *me_ctx, int x_mb, int y_mb, int *mv_x, int *mv_y, int dir)
+static void search_mv_tdls(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
 {
     int x, y;
-    int x_orig = x_mb, y_orig = y_mb;
-    int start_x, start_y, end_x, end_y;
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
+    uint64_t cost, cost_min;
     int step = ROUNDED_DIV(me_ctx->search_param, 2);
-    int x_min_cost = x_orig, y_min_cost = y_orig;
-    uint64_t cost, cost_min;
+    int i;
 
-    if (!(cost_min = get_mad(me_ctx, x_mb, y_mb, 0, 0, dir)))
+    int dia2[4][2] = {{-1, 0}, { 0,-1},
+                      { 1, 0}, { 0, 1}};
+
+    mv[0] = x_mb;
+    mv[1] = y_mb;
+
+    if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
         return;
 
     do {
-        start_y = av_clip(y_orig - step, 0, y_orig);
-        end_y = av_clip(y_orig + step + 1, 0, me_ctx->height - me_ctx->mb_size);
+        x = mv[0];
+        y = mv[1];
 
-        for (y = start_y; y < end_y; y += step) {
+        for (i = 0; i < 4; i++)
+            COST_4_MV(x + dia2[i][0] * step, y + dia2[i][1] * step)
 
-            if (y == start_y + step) {
-                start_x = av_clip(x_orig - step, 0, x_orig);
-                end_x = av_clip(x_orig + step + 1, 0, me_ctx->width - me_ctx->mb_size);
-            } else {
-                start_x = x_orig;
-                end_x = x_orig + 1;
-            }
-
-            for (x = start_x; x < end_x; x += step) {
-
-                if (y == y_orig && x == x_orig)
-                    continue;
-
-                cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir);
-                if (!cost) {
-                    *mv_x = x - x_mb;
-                    *mv_y = y - y_mb;
-                    return;
-                } else if (cost < cost_min) {
-                    cost_min = cost;
-                    x_min_cost = x;
-                    y_min_cost = y;
-                }
-            }
-        }
-
-        if (y_min_cost == y_orig || FFABS(y_min_cost - y_mb) >= me_ctx->search_param) { //FIXME
+        if (x == mv[0] && y == mv[1])
             step = step / 2;
-        } else {
-            x_orig = x_min_cost;
-            y_orig = y_min_cost;
-        }
 
     } while (step > 0);
-
-    *mv_x = x_min_cost - x_mb;
-    *mv_y = y_min_cost - y_mb;
 }
 
-static void search_mv_fss(MEContext *me_ctx, int x_mb, int y_mb, int *mv_x, int *mv_y, int dir)
+static void search_mv_fss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
 {
     int x, y;
-    int x_orig = x_mb, y_orig = y_mb;
-    int start_x, start_y, end_x, end_y;
-    int step = 2;
-    int x_min_cost = x_orig, y_min_cost = y_orig;
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
     uint64_t cost, cost_min;
+    int step = 2;
+    int i;
 
-    if (!(cost_min = get_mad(me_ctx, x_mb, y_mb, 0, 0, dir)))
+    int square[8][2] = {{0,-1}, {0,1}, {-1,0}, {1,0}, {-1,-1}, {-1,1}, {1,-1}, {1,1}};
+
+    mv[0] = x_mb;
+    mv[1] = y_mb;
+
+    if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
         return;
 
     do {
-        start_x = av_clip(x_orig - step, 0, x_orig);
-        start_y = av_clip(y_orig - step, 0, y_orig);
-        end_x = av_clip(x_orig + step + 1, 0, me_ctx->width - me_ctx->mb_size);
-        end_y = av_clip(y_orig + step + 1, 0, me_ctx->height - me_ctx->mb_size);
+        x = mv[0];
+        y = mv[1];
 
-        for (y = start_y; y < end_y; y += step) {
-            for (x = start_x; x < end_x; x += step) {
+        for (i = 0; i < 8; i++)
+            COST_4_MV(x + square[i][0] * step, y + square[i][1] * step)
 
-                // skips already checked current origin
-                if (x == x_orig && y == y_orig)
-                    continue;
-
-                cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir);
-                if (!cost) {
-                    *mv_x = x - x_mb;
-                    *mv_y = y - y_mb;
-                    return;
-                } else if (cost < cost_min) {
-                    cost_min = cost;
-                    x_min_cost = x;
-                    y_min_cost = y;
-                }
-            }
-        }
-
-        if (step == 1)
-            break;
-
-        if (x_min_cost == x_orig && y_min_cost == y_orig)
-            step = 1;
-        else {
-            int i, j, mv_x1, mv_y1;
-            do {
-                mv_x1 = x_min_cost - x_orig;
-                mv_y1 = y_min_cost - y_orig;
-
-                x_orig = x_min_cost;
-                y_orig = y_min_cost;
-
-                for (j = -step; j <= step; j += step) { //FIXME clip
-                    y = y_orig + j;
-                    for (i = -step; i <= step; i += step) {
-                        if ((4 - i * mv_x1) && (4 - j * mv_y1))
-                            continue;
-
-                        x = x_orig + i;
-                        cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir);
-                        if (!cost) {
-                            *mv_x = x - x_mb;
-                            *mv_y = y - y_mb;
-                            return;
-                        } else if (cost < cost_min) {
-                            cost_min = cost;
-                            x_min_cost = x;
-                            y_min_cost = y;
-                        }
-                    }
-                }
-
-                if (x_min_cost == x_orig && y_min_cost == y_orig ||
-                    FFABS(x_min_cost - x_mb) >= me_ctx->search_param - 1 || FFABS(y_min_cost - y_mb) >= me_ctx->search_param - 1)
-                    step = 1;
-
-            } while (step > 1);
-        }
+        if (x == mv[0] && y == mv[1])
+            step = step / 2;
 
     } while (step > 0);
-
-    *mv_x = x_min_cost - x_mb;
-    *mv_y = y_min_cost - y_mb;
 }
 
-static void search_mv_dia(MEContext *me_ctx, int x_mb, int y_mb, int *mv_x, int *mv_y, int dir)
+static void search_mv_ds(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
 {
     int x, y;
-    int x_orig = x_mb, y_orig = y_mb;
-    int start_x, start_y, end_x, end_y;
-    int step = 2;
-    int x_min_cost = x_orig, y_min_cost = y_orig;
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
     uint64_t cost, cost_min;
+    int i;
+    int dir_x, dir_y;
 
-    if (!(cost_min = get_mad(me_ctx, x_mb, y_mb, 0, 0, dir)))
+    int dia[8][2] = {{-2, 0}, {-1,-1}, { 0,-2}, { 1,-1},
+                     { 2, 0}, { 1, 1}, { 0, 2}, {-1, 1}};
+    int dia2[4][2] = {{-1, 0}, { 0,-1},
+                      { 1, 0}, { 0, 1}};
+
+    if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
+        return;
+
+    x = x_mb; y = y_mb;
+    dir_x = dir_y = 0;
+
+    do {
+        x = mv[0];
+        y = mv[1];
+
+    #if 1
+        for (i = 0; i < 8; i++)
+            COST_4_MV(x + dia[i][0], y + dia[i][1]);
+    #else
+        /*
+           this one is slightly faster than above version,
+           it skips previously examined 3 or 5 locations based on prev origin.
+        */
+        if (dir_x <= 0)
+            COST_4_MV(x - 2, y)
+        if (dir_x <= 0 && dir_y <= 0)
+            COST_4_MV(x - 1, y - 1)
+        if (dir_y <= 0)
+            COST_4_MV(x, y - 2)
+        if (dir_x >= 0 && dir_y <= 0)
+            COST_4_MV(x + 1, y - 1)
+        if (dir_x >= 0)
+            COST_4_MV(x + 2, y)
+        if (dir_x >= 0 && dir_y >= 0)
+            COST_4_MV(x + 1, y + 1)
+        if (dir_y >= 0)
+            COST_4_MV(x, y + 2)
+        if (dir_x <= 0 && dir_y >= 0)
+            COST_4_MV(x - 1, y + 1)
+
+        dir_x = mv[0] - x;
+        dir_y = mv[1] - y;
+    #endif
+
+    } while (x != mv[0] || y != mv[1]);
+
+    for (i = 0; i < 4; i++)
+        COST_4_MV(x + dia2[i][0], y + dia2[i][1])
+}
+
+void search_mv_epzs(AVMotionEstContext *me_ctx, int pred[11][2], int x_mb, int y_mb, int *mv)
+{
+    int x, y;
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
+    uint64_t cost, cost_min;
+    uint64_t threshold;
+    int i;
+
+    int dia[8][2] = {{-1, 0}, {-1,-1}, { 0,-1}, { 1,-1},
+                     { 1, 0}, { 1, 1}, { 0, 1}, {-1, 1}};
+
+    cost_min = UINT64_MAX;
+
+    COST_4_MV(pred[0][0], pred[0][1])
+
+    if (cost_min > 256) {
+        threshold = cost_min;
+        for (i = 1; i < 9; i++) {
+            if (i >= 1 && i <= 6)
+                threshold = FFMIN(cost_min, threshold);
+
+            COST_4_MV(pred[i][0], pred[i][1])
+
+            if (cost_min <= 1.2 * threshold + 128)
+                break;
+        }
+    }
+
+    do {
+        x = mv[0];
+        y = mv[1];
+
+        if (FFABS(mv[0] - x_mb) > me_ctx->search_param || FFABS(mv[1] - y_mb) > me_ctx->search_param)
+            break;
+
+        for (i = 0; i < 8; i++) {
+            if (x + dia[i][0] >= 0 && x + dia[i][0] < me_ctx->x_max &&
+                y + dia[i][1] >= 0 && y + dia[i][1] < me_ctx->y_max)
+                COST_MV(x + dia[i][0], y + dia[i][1]);
+        }
+
+    } while (x != mv[0] || y != mv[1]);
+}
+
+static void search_mv_hexbs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
+{
+    int x, y;
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
+    uint64_t cost, cost_min;
+    int i;
+
+    int hex2[6][2] = {{-2, 0}, {-1,-2}, {-1, 2},
+                      { 1,-2}, { 1, 2}, { 2, 0}};
+
+    int dia2[4][2] = {{-1, 0}, { 0,-1},
+                      { 1, 0}, { 0, 1}};
+
+    if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
         return;
 
     do {
-        start_x = av_clip(x_orig - step, 0, x_orig);
-        start_y = av_clip(y_orig - step, 0, y_orig);
-        end_x = av_clip(x_orig + step + 1, 0, me_ctx->width - me_ctx->mb_size);
-        end_y = av_clip(y_orig + step + 1, 0, me_ctx->height - me_ctx->mb_size);
+        x = mv[0];
+        y = mv[1];
 
-        for (y = start_y; y < end_y; y += step) {
-            for (x = start_x; x < end_x; x += step) {
+        for (i = 0; i < 6; i++)
+            COST_4_MV(x + hex2[i][0], y + hex2[i][1]);
 
-                // skips already checked current origin
-                if (x == x_orig && y == y_orig)
-                    continue;
+    } while (x != mv[0] || y != mv[1]);
 
-                if (FFABS(x_orig - x) + FFABS(y_orig - y) != step)
-                    continue;
+    for (i = 0; i < 4; i++)
+        COST_4_MV(x + dia2[i][0], y + dia2[i][1])
+}
 
-                cost = get_mad(me_ctx, x_mb, y_mb, x - x_mb, y - y_mb, dir);
-                if (!cost) {
-                    *mv_x = x - x_mb;
-                    *mv_y = y - y_mb;
-                    return;
-                } else if (cost < cost_min) {
-                    cost_min = cost;
-                    x_min_cost = x;
-                    y_min_cost = y;
-                }
-            }
+void search_mv_umh(AVMotionEstContext *me_ctx, int pred[5][2], int x_mb, int y_mb, int *mv)
+{
+    int x, y;
+    int x_min = FFMAX(0, x_mb - me_ctx->search_param);
+    int y_min = FFMAX(0, y_mb - me_ctx->search_param);
+    int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max - 1);
+    int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max - 1);
+    uint64_t cost, cost_min = UINT64_MAX;
+    int d, i;
+    int end_x, end_y;
+
+    int hex[16][2] = {{-4,-2}, {-4,-1}, {-4, 0}, {-4, 1}, {-4, 2},
+                      { 4,-2}, { 4,-1}, { 4, 0}, { 4, 1}, { 4, 2},
+                      {-2, 3}, { 0, 4}, { 2, 3},
+                      {-2,-3}, { 0,-4}, { 2,-3}};
+    int hex2[6][2] = {{-2, 0}, {-1,-2}, {-1, 2},
+                      { 1,-2}, { 1, 2}, { 2, 0}};
+    int dia2[4][2] = {{-1, 0}, { 0,-1},
+                      { 1, 0}, { 0, 1}};
+
+    for (i = 0; i < 5; i++)
+        COST_4_MV(pred[i][0], pred[i][1])
+
+    // Unsymmetrical-cross Search
+    x = mv[0];
+    y = mv[1];
+    for (d = 1; d <= me_ctx->search_param; d += 2) { //TODO test
+        COST_4_MV(x - d, y)
+        COST_4_MV(x + d, y)
+        if (d <= me_ctx->search_param / 2) {
+            COST_4_MV(x, y - d)
+            COST_4_MV(x, y + d)
         }
+    }
 
-        if (step == 1)
-            break;
+    // Uneven Multi-Hexagon-Grid Search
+    end_x = FFMIN(mv[0] + 2, x_max);
+    end_y = FFMIN(mv[1] + 2, y_max);
+    for (y = FFMAX(y_min, mv[1] - 2); y <= end_y; y++)
+        for (x = FFMAX(x_min, mv[0] - 2); x <= end_x; x++)
+            COST_4_MV(x, y)
 
-        if (x_min_cost == x_orig && y_min_cost == y_orig ||
-            FFABS(x_min_cost - x_mb) >= me_ctx->search_param || FFABS(y_min_cost - y_mb) >= me_ctx->search_param)
-            step = 1;
-        else {
-            //TODO skip repeated
-            x_orig = x_min_cost;
-            y_orig = y_min_cost;
-        }
+    x = mv[0];
+    y = mv[1];
+    for (d = 1; d <= me_ctx->search_param / 4; d++)
+        for (i = 1; i < 16; i++)
+            COST_4_MV(x + hex[i][0] * d, y + hex[i][1] * d)
 
-    } while (step > 0);
+    // Extended Hexagon-based Search
+    do {
+        x = mv[0];
+        y = mv[1];
 
-    *mv_x = x_min_cost - x_mb;
-    *mv_y = y_min_cost - y_mb;
+        for (i = 0; i < 6; i++)
+            COST_4_MV(x + hex2[i][0], y + hex2[i][1]);
+
+    } while (x != mv[0] || y != mv[1]);
+
+    for (i = 0; i < 4; i++)
+        COST_4_MV(x + dia2[i][0], y + dia2[i][1]);
 }
 
 static void add_mv_data(AVMotionVector *mv, int mb_size,
-                        int x, int y, int mv_x, int mv_y, int dir)
+                        int x, int y, int x_mv, int y_mv, int dir)
 {
     mv->w = mb_size;
     mv->h = mb_size;
     mv->dst_x = x + (mb_size >> 1);
     mv->dst_y = y + (mb_size >> 1);
-    mv->src_x = x + mv_x + (mb_size >> 1);
-    mv->src_y = y + mv_y + (mb_size >> 1);
+    mv->src_x = x_mv + (mb_size >> 1);
+    mv->src_y = y_mv + (mb_size >> 1);
     mv->source = dir ? 1 : -1;
     mv->flags = 0;
 }
 
 #define SEARCH_MV(method)\
-    for (mb_y = 0; mb_y < s->b_height; mb_y++)\
-        for (mb_x = 0; mb_x < s->b_width; mb_x++)\
-            for (dir = 0; dir < 2; dir++) {\
-                mv_x = 0; mv_y = 0;\
-                search_mv_##method(me_ctx, mb_x << s->log2_mb_size, mb_y << s->log2_mb_size, &mv_x, &mv_y, dir);\
-                add_mv_data(s->mvs + s->mv_count++, s->mb_size, mb_x << s->log2_mb_size, mb_y << s->log2_mb_size, mv_x, mv_y, dir);\
-            }
+    do {\
+        for (mb_y = 0; mb_y < s->b_height; mb_y++)\
+            for (mb_x = 0; mb_x < s->b_width; mb_x++) {\
+                const int x_mb = mb_x << s->log2_mb_size;\
+                const int y_mb = mb_y << s->log2_mb_size;\
+                int mv[2] = {x_mb, y_mb};\
+                search_mv_##method(me_ctx, x_mb, y_mb, mv);\
+                add_mv_data(((AVMotionVector *) sd->data) + mv_count++, me_ctx->mb_size, x_mb, y_mb, mv[0], mv[1], dir);\
+            }\
+    } while (0)
 
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 {
     AVFilterContext *ctx = inlink->dst;
-    MEFilterContext *s = ctx->priv;
-    MEContext *me_ctx = s->me_ctx;
+    MEContext *s = ctx->priv;
+    AVMotionEstContext *me_ctx = &s->me_ctx;
     AVFrameSideData *sd;
-    int mb_x, mb_y;
+    AVFrame *out;
+    int mb_x, mb_y, dir;
     int mv_x, mv_y;
-    int8_t dir;
+    int32_t mv_count = 0;
 
     av_assert0(frame->pts != AV_NOPTS_VALUE); //FIXME if (AV_NOPTS_VALUE) return 0?
 
-    av_frame_free(&me_ctx->prev);
-    me_ctx->prev = me_ctx->cur;
-    me_ctx->cur  = me_ctx->next;
-    me_ctx->next = frame;
-    s->mv_count = 0;
+    av_frame_free(&s->prev);
+    s->prev = s->cur;
+    s->cur  = s->next;
+    s->next = frame;
 
-    if (!me_ctx->cur) {
-        me_ctx->cur = av_frame_clone(frame);
-        if (!me_ctx->cur)
+    s->mv_table[2] = memcpy(s->mv_table[2], s->mv_table[1], sizeof(*s->mv_table[1]) * s->b_count);
+    s->mv_table[1] = memcpy(s->mv_table[1], s->mv_table[0], sizeof(*s->mv_table[0]) * s->b_count);
+
+    if (!s->cur) {
+        s->cur = av_frame_clone(frame);
+        if (!s->cur)
             return AVERROR(ENOMEM);
     }
 
-    if (!me_ctx->prev)
+    if (!s->prev)
         return 0;
 
-    switch (s->method) {
-        case ME_METHOD_ESA:
-            /* exhaustive search */
-            SEARCH_MV(esa);
-            break;
-        case ME_METHOD_TSS:
-            /* three step search */
-            SEARCH_MV(tss);
-            break;
-        case ME_METHOD_NTSS:
-            /* new three step search */
-            SEARCH_MV(ntss);
-            break;
-        case ME_METHOD_TDLS:
-            /* two dimensional logarithmic search */
-            SEARCH_MV(tdls);
-            break;
-        case ME_METHOD_FSS:
-            /* four step search */
-            SEARCH_MV(fss);
-            break;
-        case ME_METHOD_DIA:
-            /* diamond search */
-            SEARCH_MV(dia);
-            break;
-    }
-
-    AVFrame *out = av_frame_clone(me_ctx->cur);
+    out = av_frame_clone(s->cur);
     if (!out)
         return AVERROR(ENOMEM);
-    out->pts = me_ctx->next->pts;
 
-    if (s->mv_count) {
-        sd = av_frame_new_side_data(out, AV_FRAME_DATA_MOTION_VECTORS, s->mv_count * sizeof(AVMotionVector));
-        if (!sd)
-            return AVERROR(ENOMEM);
-        memcpy(sd->data, s->mvs, s->mv_count * sizeof(AVMotionVector));
+    sd = av_frame_new_side_data(out, AV_FRAME_DATA_MOTION_VECTORS, 2 * s->b_count * sizeof(AVMotionVector));
+    if (!sd)
+        return AVERROR(ENOMEM);
+
+    me_ctx->data_cur = s->cur->data[0];
+    me_ctx->linesize = s->cur->linesize[0];
+
+    for (dir = 0; dir < 2; dir++) {
+        me_ctx->data_ref = (dir ? s->next : s->prev)->data[0];
+
+        if (s->method == ME_METHOD_DS)
+            SEARCH_MV(ds);
+        else if (s->method == ME_METHOD_ESA)
+            SEARCH_MV(esa);
+        else if (s->method == ME_METHOD_FSS)
+            SEARCH_MV(fss);
+        else if (s->method == ME_METHOD_NTSS)
+            SEARCH_MV(ntss);
+        else if (s->method == ME_METHOD_TDLS)
+            SEARCH_MV(tdls);
+        else if (s->method == ME_METHOD_TSS)
+            SEARCH_MV(tss);
+        else if (s->method == ME_METHOD_HEXBS)
+            SEARCH_MV(hexbs);
+        else if (s->method == ME_METHOD_UMH) {
+            for (mb_y = 0; mb_y < s->b_height; mb_y++)
+                for (mb_x = 0; mb_x < s->b_width; mb_x++) {
+                    const int mb_i = mb_x + mb_y * s->b_width;
+                    const int x_mb = mb_x << s->log2_mb_size;
+                    const int y_mb = mb_y << s->log2_mb_size;
+                    int mv[2] = {x_mb, y_mb};
+                    int pred[5][2];
+
+                    pred[1][0] = x_mb;
+                    pred[1][1] = y_mb;
+
+                    /* according to rules specified in paper, when nb is out of frame */
+
+                    //left mb in current frame
+                    if (mb_x != 0) {
+                        pred[2][0] = s->mv_table[0][mb_x - 1 + mb_y * s->b_width][dir][0];
+                        pred[2][1] = s->mv_table[0][mb_x - 1 + mb_y * s->b_width][dir][1];
+                    } else {
+                        pred[2][0] = x_mb;
+                        pred[2][1] = y_mb;
+                    }
+
+                    //top mb in current frame
+                    if (mb_y != 0) {
+                        pred[3][0] = s->mv_table[0][mb_x + (mb_y - 1) * s->b_width][dir][0];
+                        pred[3][1] = s->mv_table[0][mb_x + (mb_y - 1) * s->b_width][dir][1];
+                        //top-right mb in current frame
+                        if (mb_x < s->b_width - 1) {
+                            pred[4][0] = s->mv_table[0][mb_x + 1 + (mb_y - 1) * s->b_width][dir][0];
+                            pred[4][1] = s->mv_table[0][mb_x + 1 + (mb_y - 1) * s->b_width][dir][1];
+                        } else if (mb_x != 0) {
+                            //top-left mb in current frame
+                            pred[4][0] = s->mv_table[0][mb_x - 1 + (mb_y - 1) * s->b_width][dir][0];
+                            pred[4][1] = s->mv_table[0][mb_x - 1 + (mb_y - 1) * s->b_width][dir][1];
+                        } else {
+                            pred[4][0] = pred[2][0];
+                            pred[4][1] = pred[2][1];
+                        }
+                    } else {
+                        pred[3][0] = pred[2][0];
+                        pred[3][1] = pred[2][1];
+                        pred[4][0] = pred[2][0];
+                        pred[4][1] = pred[2][1];
+                    }
+
+                    //median predictor
+                    pred[0][0] = mid_pred(pred[2][0], pred[3][0], pred[4][0]);
+                    pred[0][1] = mid_pred(pred[2][1], pred[3][1], pred[4][1]);
+
+                    search_mv_umh(me_ctx, pred, x_mb, y_mb, mv);
+
+                    s->mv_table[0][mb_i][dir][0] = mv[0];
+                    s->mv_table[0][mb_i][dir][1] = mv[1];
+                    add_mv_data(((AVMotionVector *) sd->data) + mv_count++, me_ctx->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
+                }
+
+        } else if (s->method == ME_METHOD_EPZS) {
+
+            for (mb_y = 0; mb_y < s->b_height; mb_y++)
+                for (mb_x = 0; mb_x < s->b_width; mb_x++) {
+                    const int mb_i = mb_x + mb_y * s->b_width;
+                    const int x_mb = mb_x << s->log2_mb_size;
+                    const int y_mb = mb_y << s->log2_mb_size;
+                    int mv[2] = {x_mb, y_mb};
+                    int pred[11][2];
+                    int p;
+
+                    for (p = 0; p < 11; p++) {
+                        pred[p][0] = x_mb;
+                        pred[p][1] = y_mb;
+                    }
+
+                    //left mb in current frame
+                    if (mb_x != 0) {
+                        pred[2][0] = s->mv_table[0][mb_x - 1 + mb_y * s->b_width][dir][0];
+                        pred[2][1] = s->mv_table[0][mb_x - 1 + mb_y * s->b_width][dir][1];
+                    }
+
+                    //top mb in current frame
+                    if (mb_y != 0) {
+                        pred[3][0] = s->mv_table[0][mb_x + (mb_y - 1) * s->b_width][dir][0];
+                        pred[3][1] = s->mv_table[0][mb_x + (mb_y - 1) * s->b_width][dir][1];
+                    }
+
+                    //top-right mb in current frame
+                    if (mb_y != 0 && mb_x < s->b_width - 1) {
+                        pred[4][0] = s->mv_table[0][mb_x + 1 + (mb_y - 1) * s->b_width][dir][0];
+                        pred[4][1] = s->mv_table[0][mb_x + 1 + (mb_y - 1) * s->b_width][dir][1];
+                    }
+
+                    //median predictor
+                    pred[0][0] = mid_pred(pred[2][0], pred[3][0], pred[4][0]);
+                    pred[0][1] = mid_pred(pred[2][1], pred[3][1], pred[4][1]);
+
+                    //collocated mb in prev frame
+                    pred[5][0] = s->mv_table[1][mb_i][dir][0];
+                    pred[5][1] = s->mv_table[1][mb_i][dir][1];
+
+                    //accelerator motion vector of collocated block in prev frame
+                    pred[6][0] = s->mv_table[1][mb_i][dir][0] + (s->mv_table[1][mb_i][dir][0] - s->mv_table[2][mb_i][dir][0]);
+                    pred[6][1] = s->mv_table[1][mb_i][dir][1] + (s->mv_table[1][mb_i][dir][1] - s->mv_table[2][mb_i][dir][1]);
+                    pred[6][0] = av_clip(pred[6][0], 0, me_ctx->x_max - 1);
+                    pred[6][1] = av_clip(pred[6][1], 0, me_ctx->y_max - 1);
+
+                    //left mb in prev frame
+                    if (mb_x != 0) {
+                        pred[7][0] = s->mv_table[1][mb_x - 1 + mb_y * s->b_width][dir][0];
+                        pred[7][1] = s->mv_table[1][mb_x - 1 + mb_y * s->b_width][dir][1];
+                    }
+
+                    //top mb in prev frame
+                    if (mb_y != 0) {
+                        pred[8][0] = s->mv_table[1][mb_x + (mb_y - 1) * s->b_width][dir][0];
+                        pred[8][1] = s->mv_table[1][mb_x + (mb_y - 1) * s->b_width][dir][1];
+                    }
+
+                    //right mb in prev frame
+                    if (mb_x < s->b_width - 1) {
+                        pred[9][0] = s->mv_table[1][mb_x + 1 + mb_y * s->b_width][dir][0];
+                        pred[9][1] = s->mv_table[1][mb_x + 1 + mb_y * s->b_width][dir][1];
+                    }
+
+                    //bottom mb in prev frame
+                    if (mb_y < s->b_height - 1) {
+                        pred[10][0] = s->mv_table[1][mb_x + (mb_y + 1) * s->b_width][dir][0];
+                        pred[10][1] = s->mv_table[1][mb_x + (mb_y + 1) * s->b_width][dir][1];
+                    }
+
+                    search_mv_epzs(me_ctx, pred, x_mb, y_mb, mv);
+
+                    s->mv_table[0][mb_i][dir][0] = mv[0];
+                    s->mv_table[0][mb_i][dir][1] = mv[1];
+                    add_mv_data(((AVMotionVector *) sd->data) + mv_count++, s->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
+                }
+        }
     }
 
     return ff_filter_frame(ctx->outputs[0], out);
@@ -642,14 +762,11 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 
 static av_cold void uninit(AVFilterContext *ctx)
 {
-    MEFilterContext *s = ctx->priv;
-    MEContext *me_ctx = s->me_ctx;
+    MEContext *s = ctx->priv;
 
-    av_frame_free(&me_ctx->prev);
-    av_frame_free(&me_ctx->cur);
-    av_frame_free(&me_ctx->next);
-    av_freep(&s->me_ctx);
-    av_freep(&s->mvs);
+    av_frame_free(&s->prev);
+    av_frame_free(&s->cur);
+    av_frame_free(&s->next);
 }
 
 static const AVFilterPad mestimate_inputs[] = {
@@ -673,7 +790,7 @@ static const AVFilterPad mestimate_outputs[] = {
 AVFilter ff_vf_mestimate = {
     .name          = "mestimate",
     .description   = NULL_IF_CONFIG_SMALL("Generate motion vectors."),
-    .priv_size     = sizeof(MEFilterContext),
+    .priv_size     = sizeof(MEContext),
     .priv_class    = &mestimate_class,
     .uninit        = uninit,
     .query_formats = query_formats,
