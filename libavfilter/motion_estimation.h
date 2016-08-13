@@ -1,0 +1,76 @@
+/**
+ * Copyright (c) 2016 Davinder Singh (DSM_) <ds.mudhar<@gmail.com>
+ *
+ * This file is part of FFmpeg.
+ *
+ * FFmpeg is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * FFmpeg is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with FFmpeg; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
+
+#ifndef AVFILTER_MOTION_ESTIMATION_H
+#define AVFILTER_MOTION_ESTIMATION_H
+
+#include "libavutil/avutil.h"
+
+enum MEMethod {
+    ME_METHOD_ESA           = 1,
+    ME_METHOD_TSS           = 2,
+    ME_METHOD_TDLS          = 3,
+    ME_METHOD_NTSS          = 4,
+    ME_METHOD_FSS           = 5,
+    ME_METHOD_DS            = 6,
+    ME_METHOD_HEXBS         = 7,
+    ME_METHOD_EPZS          = 8,    
+    ME_METHOD_UMH           = 9,
+};
+
+typedef struct AVMotionEstContext {
+    uint8_t *data_cur, *data_ref;
+    int linesize;
+
+    int mb_size;
+    int search_param;
+
+    int width;
+    int height;
+
+    int x_max;
+    int y_max;
+    uint64_t (*get_cost)(struct AVMotionEstContext *me_ctx, int x_mb, int y_mb,
+                         int mv_x, int mv_y);
+} AVMotionEstContext;
+
+void ff_me_init_context(AVMotionEstContext *me_ctx, int mb_size, int search_param, int width, int height);
+
+uint64_t get_sad(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int x_mv, int y_mv);
+
+uint64_t ff_me_search_esa(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv);
+
+uint64_t ff_me_search_tss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv);
+
+uint64_t ff_me_search_tdls(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv);
+
+uint64_t ff_me_search_ntss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv);
+
+uint64_t ff_me_search_fss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv);
+
+uint64_t ff_me_search_ds(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv);
+
+uint64_t ff_me_search_hexbs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv);
+
+uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int pred[11][2], int x_mb, int y_mb, int *mv);
+
+uint64_t ff_me_search_umh(AVMotionEstContext *me_ctx, int pred[5][2], int x_mb, int y_mb, int *mv);
+
+#endif /* AVFILTER_MOTION_ESTIMATION_H */
