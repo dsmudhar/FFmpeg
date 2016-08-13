@@ -51,7 +51,7 @@ typedef struct MEContext {
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption mestimate_options[] = {
-    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = ME_METHOD_ESA}, ME_METHOD_DS, ME_METHOD_UMH, FLAGS, "method" },
+    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = ME_METHOD_ESA}, ME_METHOD_ESA, ME_METHOD_UMH, FLAGS, "method" },
         CONST("esa",   "exhaustive search",                  ME_METHOD_ESA,   "method"),
         CONST("tss",   "three step search",                  ME_METHOD_TSS,   "method"),
         CONST("tdls",  "two dimensional logarithmic search", ME_METHOD_TDLS,  "method"),
@@ -144,7 +144,6 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     AVFrameSideData *sd;
     AVFrame *out;
     int mb_x, mb_y, dir;
-    int mv_x, mv_y;
     int32_t mv_count = 0;
     int ret;
 
@@ -340,10 +339,14 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 static av_cold void uninit(AVFilterContext *ctx)
 {
     MEContext *s = ctx->priv;
+    int i;
 
     av_frame_free(&s->prev);
     av_frame_free(&s->cur);
     av_frame_free(&s->next);
+
+    for (i = 0; i < 3; i++)
+        av_freep(&s->mv_table[i]);
 }
 
 static const AVFilterPad mestimate_inputs[] = {
