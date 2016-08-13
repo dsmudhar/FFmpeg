@@ -175,6 +175,7 @@ typedef struct MIContext {
     Cluster clusters[NB_CLUSTERS];
     Block *int_blocks;
     Pixel *pixels;
+    int (*mv_table[3])[2][2];
     int64_t out_pts;
     int b_width, b_height, b_count;
     int log2_mb_size;
@@ -328,6 +329,14 @@ static int config_input(AVFilterLink *inlink)
         if (mi_ctx->me_mode == ME_MODE_BILATERAL)
             if (!(mi_ctx->int_blocks = av_mallocz_array(mi_ctx->b_count, sizeof(Block))))
                 return AVERROR(ENOMEM);
+
+        if (mi_ctx->me_method == ME_METHOD_EPZS) {
+            for (i = 0; i < 3; i++) {
+                mi_ctx->mv_table[i] = av_mallocz_array(mi_ctx->b_count, sizeof(*mi_ctx->mv_table[0]));
+                if (!mi_ctx->mv_table[i])
+                    return AVERROR(ENOMEM);
+            }
+        }
     }
 
     ff_me_init_context(me_ctx, mi_ctx->mb_size, mi_ctx->search_param, width, height);
@@ -371,9 +380,76 @@ static void search_mv(MIContext *mi_ctx, Block *blocks, int mb_x, int mb_y, int 
         ff_me_search_ds(me_ctx, x_mb, y_mb, mv);
     else if (mi_ctx->me_method == ME_METHOD_HEXBS)
         ff_me_search_hexbs(me_ctx, x_mb, y_mb, mv);
-    else if (mi_ctx->me_method == ME_METHOD_EPZS)
-        ; //TODO add epzs
-    else if (mi_ctx->me_method == ME_METHOD_UMH) {
+    else if (mi_ctx->me_method == ME_METHOD_EPZS) {
+        int mb_i = mb_x + mb_y * mi_ctx->b_width;
+        int pred[11][2];
+
+        for (i = 0; i < 11; i++) {
+            pred[i][0] = x_mb;
+            pred[i][1] = y_mb;
+        }
+
+        //left mb in current frame
+        if (mb_x != 0) {
+            pred[2][0] = mi_ctx->mv_table[0][mb_x - 1 + mb_y * mi_ctx->b_width][dir][0];
+            pred[2][1] = mi_ctx->mv_table[0][mb_x - 1 + mb_y * mi_ctx->b_width][dir][1];
+        }
+
+        //top mb in current frame
+        if (mb_y != 0) {
+            pred[3][0] = mi_ctx->mv_table[0][mb_x + (mb_y - 1) * mi_ctx->b_width][dir][0];
+            pred[3][1] = mi_ctx->mv_table[0][mb_x + (mb_y - 1) * mi_ctx->b_width][dir][1];
+        }
+
+        //top-right mb in current frame
+        if (mb_y != 0 && mb_x < mi_ctx->b_width - 1) {
+            pred[4][0] = mi_ctx->mv_table[0][mb_x + 1 + (mb_y - 1) * mi_ctx->b_width][dir][0];
+            pred[4][1] = mi_ctx->mv_table[0][mb_x + 1 + (mb_y - 1) * mi_ctx->b_width][dir][1];
+        }
+
+        //median predictor
+        pred[0][0] = mid_pred(pred[2][0], pred[3][0], pred[4][0]);
+        pred[0][1] = mid_pred(pred[2][1], pred[3][1], pred[4][1]);
+
+        //collocated mb in prev frame
+        pred[5][0] = mi_ctx->mv_table[1][mb_i][dir][0];
+        pred[5][1] = mi_ctx->mv_table[1][mb_i][dir][1];
+
+        //accelerator motion vector of collocated block in prev frame
+        pred[6][0] = mi_ctx->mv_table[1][mb_i][dir][0] + (mi_ctx->mv_table[1][mb_i][dir][0] - mi_ctx->mv_table[2][mb_i][dir][0]);
+        pred[6][1] = mi_ctx->mv_table[1][mb_i][dir][1] + (mi_ctx->mv_table[1][mb_i][dir][1] - mi_ctx->mv_table[2][mb_i][dir][1]);
+        pred[6][0] = av_clip(pred[6][0], 0, me_ctx->x_max - 1);
+        pred[6][1] = av_clip(pred[6][1], 0, me_ctx->y_max - 1);
+
+        //left mb in prev frame
+        if (mb_x != 0) {
+            pred[7][0] = mi_ctx->mv_table[1][mb_x - 1 + mb_y * mi_ctx->b_width][dir][0];
+            pred[7][1] = mi_ctx->mv_table[1][mb_x - 1 + mb_y * mi_ctx->b_width][dir][1];
+        }
+
+        //top mb in prev frame
+        if (mb_y != 0) {
+            pred[8][0] = mi_ctx->mv_table[1][mb_x + (mb_y - 1) * mi_ctx->b_width][dir][0];
+            pred[8][1] = mi_ctx->mv_table[1][mb_x + (mb_y - 1) * mi_ctx->b_width][dir][1];
+        }
+
+        //right mb in prev frame
+        if (mb_x < mi_ctx->b_width - 1) {
+            pred[9][0] = mi_ctx->mv_table[1][mb_x + 1 + mb_y * mi_ctx->b_width][dir][0];
+            pred[9][1] = mi_ctx->mv_table[1][mb_x + 1 + mb_y * mi_ctx->b_width][dir][1];
+        }
+
+        //bottom mb in prev frame
+        if (mb_y < mi_ctx->b_height - 1) {
+            pred[10][0] = mi_ctx->mv_table[1][mb_x + (mb_y + 1) * mi_ctx->b_width][dir][0];
+            pred[10][1] = mi_ctx->mv_table[1][mb_x + (mb_y + 1) * mi_ctx->b_width][dir][1];
+        }
+
+        ff_me_search_epzs(me_ctx, pred, x_mb, y_mb, mv);
+
+        mi_ctx->mv_table[0][mb_i][dir][0] = mv[0];
+        mi_ctx->mv_table[0][mb_i][dir][1] = mv[1];
+    } else if (mi_ctx->me_method == ME_METHOD_UMH) {
         int pred[5][2];
 
         for (i = 0; i < 5; i++) {
@@ -508,9 +584,7 @@ static int var_size_bme(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int
 
             mi_ctx->me_ctx.mb_size = mb_size;
 
-            if (
-                cost_sb < cost_old / 4) {
-
+            if (cost_sb < cost_old / 4) {
                 sb->mvs[0][0] = mv_x;
                 sb->mvs[0][1] = mv_y;
                 //if (sb->mvs[0][0]/2 != block->mvs[0][0]/2 || sb->mvs[0][1]/2 != block->mvs[0][1]/2) av_log(0, 0, "new mv: (%d, %d) vs (%d, %d)\n", sb->mvs[0][0], sb->mvs[0][1], block->mvs[0][0], block->mvs[0][1]);
@@ -640,6 +714,12 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
     frame = &mi_ctx->frames[NB_FRAMES - 1];
 
     if (mi_ctx->mi_mode == MI_MODE_MCI) {
+
+        if (mi_ctx->me_method == ME_METHOD_EPZS) {
+            mi_ctx->mv_table[2] = memcpy(mi_ctx->mv_table[2], mi_ctx->mv_table[1], sizeof(*mi_ctx->mv_table[1]) * mi_ctx->b_count);
+            mi_ctx->mv_table[1] = memcpy(mi_ctx->mv_table[1], mi_ctx->mv_table[0], sizeof(*mi_ctx->mv_table[0]) * mi_ctx->b_count);
+        }
+
         if (mi_ctx->me_mode == ME_MODE_BIDIRECTIONAL) {
             int mb_x, mb_y, dir;
 
@@ -650,10 +730,8 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
                     mi_ctx->me_ctx.data_ref = mi_ctx->frames[dir ? 3 : 1].avf->data[0];
 
                     for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-                        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-
+                        for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++)
                             search_mv(mi_ctx, mi_ctx->frames[2].blocks, mb_x, mb_y, dir);
-                        }
                 }
             }
 
@@ -684,9 +762,7 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
 
                 }
             }*/
-        }
-
-        if (mi_ctx->me_mode == ME_MODE_BILATERAL) {
+        } else if (mi_ctx->me_mode == ME_MODE_BILATERAL) {
             int i, ret;
 
             if (!mi_ctx->frames[0].avf)
@@ -1229,6 +1305,9 @@ static av_cold void uninit(AVFilterContext *ctx)
         av_freep(&frame->blocks);
         av_frame_free(&frame->avf);
     }
+
+    for (i = 0; i < 3; i++)
+        av_freep(&mi_ctx->mv_table[i]);
 }
 
 static const AVFilterPad minterpolate_inputs[] = {
