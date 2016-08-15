@@ -26,6 +26,7 @@
 #include "libavutil/motion_vector.h"
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
+#include "libavutil/pixelutils.h"
 #include "avfilter.h"
 #include "formats.h"
 #include "internal.h"
@@ -40,7 +41,7 @@
 //TESTS
 #define DEBUG_CLUSTERING 0
 #define CACHE_MVS 0
-#define EXPORT_MVS 1
+#define EXPORT_MVS 0
 
 #define NB_FRAMES 4
 #define NB_PIXEL_MVS 16
@@ -179,6 +180,10 @@ typedef struct MIContext {
     int64_t out_pts;
     int b_width, b_height, b_count;
     int log2_mb_size;
+
+    av_pixelutils_sad_fn sad;
+    double prev_mafd;
+    int scene_changed;
 
     int chroma_height;
     int chroma_width;
@@ -338,6 +343,10 @@ static int config_input(AVFilterLink *inlink)
             }
         }
     }
+
+    mi_ctx->sad = av_pixelutils_get_sad_fn(3, 3, 2, mi_ctx);
+    if (!mi_ctx->sad)
+        return AVERROR(EINVAL);
 
     ff_me_init_context(me_ctx, mi_ctx->mb_size, mi_ctx->search_param, width, height);
     if (mi_ctx->me_mode == ME_MODE_BILATERAL)
@@ -790,6 +799,29 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
     return 0;
 }
 
+static int detect_scene_change(MIContext *mi_ctx)
+{
+    AVMotionEstContext *me_ctx = &mi_ctx->me_ctx;
+    int x, y;
+    int linesize = me_ctx->linesize;
+    double ret = 0, mafd, diff;
+    int64_t sad;
+    uint8_t *p1 = mi_ctx->frames[1].avf->data[0];
+    uint8_t *p2 = mi_ctx->frames[2].avf->data[0];
+
+    for (sad = y = 0; y < me_ctx->height; y += 8)
+        for (x = 0; x < linesize; x += 8)
+            sad += mi_ctx->sad(p1 + x + y * linesize, linesize, p2 + x + y * linesize, linesize);
+
+    emms_c();
+    mafd = (double) sad / (me_ctx->height * me_ctx->width * 3);
+    diff = fabs(mafd - mi_ctx->prev_mafd);
+    ret  = av_clipf(FFMIN(mafd, diff), 0, 100.0);
+    mi_ctx->prev_mafd = mafd;
+
+    return ret >= 5; //TODO add option
+}
+
 static int get_roughness(MIContext *mi_ctx, int mb_x, int mb_y, int mv_x, int mv_y, int dir)
 {
     int x, y;
@@ -1064,6 +1096,13 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
         return;
     }
 
+    if (mi_ctx->scene_changed) {
+        av_log(0, 0, "scene_changed\n");
+        //duplicate frame
+        av_frame_copy(avf_out, alpha > ALPHA_MAX / 2 ? mi_ctx->frames[2].avf : mi_ctx->frames[1].avf);
+        return;
+    }
+
     switch(mi_ctx->mi_mode) {
         case MI_MODE_DUP:
             av_frame_copy(avf_out, alpha > ALPHA_MAX / 2 ? mi_ctx->frames[2].avf : mi_ctx->frames[1].avf);
@@ -1099,6 +1138,7 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
 
             #if DEBUG_CLUSTERING
                 int dx, dy;
+                int c;
                 av_frame_copy(avf_out, mi_ctx->frames[2].avf);
 
                 for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
@@ -1151,7 +1191,7 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                 mi_ctx->cls++;
                 if (mi_ctx->cls >= mi_ctx->cls_max)
                     mi_ctx->cls = 1;
-                for (int c = 0; c < mi_ctx->cls_max; c++) {
+                for (c = 0; c < mi_ctx->cls_max; c++) {
                     if (mi_ctx->clusters[mi_ctx->cls].nb < 2) {
                         mi_ctx->cls++;
                         if (mi_ctx->cls >= mi_ctx->cls_max) {
@@ -1162,6 +1202,7 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                 }
 
             #else
+
                 for (y = 0; y < mi_ctx->frames[0].avf->height; y++)
                     for (x = 0; x < mi_ctx->frames[0].avf->width; x++)
                         mi_ctx->pixels[x + y * mi_ctx->frames[0].avf->width].nb = 0;
@@ -1172,6 +1213,7 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
 
                         if (block->sb)
                             var_size_bmc(mi_ctx, block, mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, mi_ctx->log2_mb_size, alpha);
+
                         obmc_bilateral(mi_ctx, block, mb_x, mb_y, alpha);
 
                     }
@@ -1182,10 +1224,11 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
 
             #if EXPORT_MVS
                 /* export MVs */
-                AVFrameSideData *sd = av_frame_new_side_data(avf_out, AV_FRAME_DATA_MOTION_VECTORS, 4 * mi_ctx->b_count * sizeof(AVMotionVector));
+                AVFrameSideData *sd;
                 AVMotionVector *mv;
                 int count = 0;
 
+                sd = av_frame_new_side_data(avf_out, AV_FRAME_DATA_MOTION_VECTORS, 4 * mi_ctx->b_count * sizeof(AVMotionVector));
                 mv = (AVMotionVector *) sd->data;
                 for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
                     for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
@@ -1230,6 +1273,7 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                 }
             #endif
             }
+
             break;
     }
 }
@@ -1261,6 +1305,8 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *avf_in)
     if (!mi_ctx->frames[0].avf)
         return 0;
 
+    mi_ctx->scene_changed = detect_scene_change(mi_ctx);
+
     for (;;) {
         AVFrame *avf_out;
 
@@ -1278,6 +1324,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *avf_in)
         if ((ret = ff_filter_frame(ctx->outputs[0], avf_out)) < 0)
             return ret;
     }
+
     return 0;
 }
 
