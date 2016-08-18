@@ -136,6 +136,13 @@ static void add_mv_data(AVMotionVector *mv, int mb_size,
             }\
     } while (0)
 
+#define ADD_PRED(preds, px, py)\
+    do {\
+        preds.mvs[preds.nb][0] = px;\
+        preds.mvs[preds.nb][1] = py;\
+        preds.nb++;\
+    } while(0)
+
 static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -204,51 +211,47 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                     const int x_mb = mb_x << s->log2_mb_size;
                     const int y_mb = mb_y << s->log2_mb_size;
                     int mv[2] = {x_mb, y_mb};
-                    int pred[5][2];
 
-                    pred[1][0] = x_mb;
-                    pred[1][1] = y_mb;
+                    AVMotionEstPredictor *preds = me_ctx->preds;
+                    preds[0].nb = 0;
+
+                    ADD_PRED(preds[0], 0, 0);
 
                     //left mb in current frame
-                    if (mb_x != 0) {
-                        pred[2][0] = s->mv_table[0][mb_x - 1 + mb_y * s->b_width][dir][0];
-                        pred[2][1] = s->mv_table[0][mb_x - 1 + mb_y * s->b_width][dir][1];
-                    } else {
-                        pred[2][0] = x_mb;
-                        pred[2][1] = y_mb;
-                    }
+                    if (mb_x > 0)
+                        ADD_PRED(preds[0], s->mv_table[0][mb_i - 1][dir][0], s->mv_table[0][mb_i - 1][dir][1]);
 
-                    //top mb in current frame
-                    if (mb_y != 0) {
-                        pred[3][0] = s->mv_table[0][mb_x + (mb_y - 1) * s->b_width][dir][0];
-                        pred[3][1] = s->mv_table[0][mb_x + (mb_y - 1) * s->b_width][dir][1];
+                    if (mb_y > 0) {
+                        //top mb in current frame
+                        ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width][dir][0], s->mv_table[0][mb_i - s->b_width][dir][1]);
+
                         //top-right mb in current frame
-                        if (mb_x < s->b_width - 1) {
-                            pred[4][0] = s->mv_table[0][mb_x + 1 + (mb_y - 1) * s->b_width][dir][0];
-                            pred[4][1] = s->mv_table[0][mb_x + 1 + (mb_y - 1) * s->b_width][dir][1];
-                        } else if (mb_x != 0) {
-                            //top-left mb in current frame
-                            pred[4][0] = s->mv_table[0][mb_x - 1 + (mb_y - 1) * s->b_width][dir][0];
-                            pred[4][1] = s->mv_table[0][mb_x - 1 + (mb_y - 1) * s->b_width][dir][1];
-                        } else {
-                            pred[4][0] = pred[2][0];
-                            pred[4][1] = pred[2][1];
-                        }
-                    } else {
-                        pred[3][0] = pred[2][0];
-                        pred[3][1] = pred[2][1];
-                        pred[4][0] = pred[2][0];
-                        pred[4][1] = pred[2][1];
+                        if (mb_x + 1 < s->b_width)
+                            ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width + 1][dir][0], s->mv_table[0][mb_i - s->b_width + 1][dir][1]);
+                        //top-left mb in current frame
+                        else if (mb_x > 0)
+                            ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width - 1][dir][0], s->mv_table[0][mb_i - s->b_width - 1][dir][1]);
                     }
 
                     //median predictor
-                    pred[0][0] = mid_pred(pred[2][0], pred[3][0], pred[4][0]);
-                    pred[0][1] = mid_pred(pred[2][1], pred[3][1], pred[4][1]);
+                    if (preds[0].nb == 4) {
+                        me_ctx->pred_x = mid_pred(preds[0].mvs[1][0], preds[0].mvs[2][0], preds[0].mvs[3][0]);
+                        me_ctx->pred_y = mid_pred(preds[0].mvs[1][1], preds[0].mvs[2][1], preds[0].mvs[3][1]);
+                    } else if (preds[0].nb == 3) {
+                        me_ctx->pred_x = mid_pred(0, preds[0].mvs[1][0], preds[0].mvs[2][0]);
+                        me_ctx->pred_y = mid_pred(0, preds[0].mvs[1][1], preds[0].mvs[2][1]);
+                    } else if (preds[0].nb == 2) {
+                        me_ctx->pred_x = preds[0].mvs[1][0];
+                        me_ctx->pred_y = preds[0].mvs[1][1];
+                    } else {
+                        me_ctx->pred_x = 0;
+                        me_ctx->pred_y = 0;
+                    }
 
-                    ff_me_search_umh(me_ctx, pred, x_mb, y_mb, mv);
+                    ff_me_search_umh(me_ctx, x_mb, y_mb, mv);
 
-                    s->mv_table[0][mb_i][dir][0] = mv[0];
-                    s->mv_table[0][mb_i][dir][1] = mv[1];
+                    s->mv_table[0][mb_i][dir][0] = mv[0] - x_mb;
+                    s->mv_table[0][mb_i][dir][1] = mv[1] - y_mb;
                     add_mv_data(((AVMotionVector *) sd->data) + mv_count++, me_ctx->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
                 }
 
@@ -260,74 +263,67 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                     const int x_mb = mb_x << s->log2_mb_size;
                     const int y_mb = mb_y << s->log2_mb_size;
                     int mv[2] = {x_mb, y_mb};
-                    int pred[11][2];
-                    int p;
 
-                    for (p = 0; p < 11; p++) {
-                        pred[p][0] = x_mb;
-                        pred[p][1] = y_mb;
-                    }
+                    AVMotionEstPredictor *preds = me_ctx->preds;
+                    preds[0].nb = 0;
+                    preds[1].nb = 0;
+
+                    ADD_PRED(preds[0], 0, 0);
 
                     //left mb in current frame
-                    if (mb_x != 0) {
-                        pred[2][0] = s->mv_table[0][mb_x - 1 + mb_y * s->b_width][dir][0];
-                        pred[2][1] = s->mv_table[0][mb_x - 1 + mb_y * s->b_width][dir][1];
-                    }
+                    if (mb_x > 0)
+                        ADD_PRED(preds[0], s->mv_table[0][mb_i - 1][dir][0], s->mv_table[0][mb_i - 1][dir][1]);
 
                     //top mb in current frame
-                    if (mb_y != 0) {
-                        pred[3][0] = s->mv_table[0][mb_x + (mb_y - 1) * s->b_width][dir][0];
-                        pred[3][1] = s->mv_table[0][mb_x + (mb_y - 1) * s->b_width][dir][1];
-                    }
+                    if (mb_y > 0)
+                        ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width][dir][0], s->mv_table[0][mb_i - s->b_width][dir][1]);
 
                     //top-right mb in current frame
-                    if (mb_y != 0 && mb_x < s->b_width - 1) {
-                        pred[4][0] = s->mv_table[0][mb_x + 1 + (mb_y - 1) * s->b_width][dir][0];
-                        pred[4][1] = s->mv_table[0][mb_x + 1 + (mb_y - 1) * s->b_width][dir][1];
-                    }
+                    if (mb_y > 0 && mb_x + 1 < s->b_width)
+                        ADD_PRED(preds[0], s->mv_table[0][mb_i - s->b_width + 1][dir][0], s->mv_table[0][mb_i - s->b_width + 1][dir][1]);
 
                     //median predictor
-                    pred[0][0] = mid_pred(pred[2][0], pred[3][0], pred[4][0]);
-                    pred[0][1] = mid_pred(pred[2][1], pred[3][1], pred[4][1]);
+                    if (preds[0].nb == 4) {
+                        me_ctx->pred_x = mid_pred(preds[0].mvs[1][0], preds[0].mvs[2][0], preds[0].mvs[3][0]);
+                        me_ctx->pred_y = mid_pred(preds[0].mvs[1][1], preds[0].mvs[2][1], preds[0].mvs[3][1]);
+                    } else if (preds[0].nb == 3) {
+                        me_ctx->pred_x = mid_pred(0, preds[0].mvs[1][0], preds[0].mvs[2][0]);
+                        me_ctx->pred_y = mid_pred(0, preds[0].mvs[1][1], preds[0].mvs[2][1]);
+                    } else if (preds[0].nb == 2) {
+                        me_ctx->pred_x = preds[0].mvs[1][0];
+                        me_ctx->pred_y = preds[0].mvs[1][1];
+                    } else {
+                        me_ctx->pred_x = 0;
+                        me_ctx->pred_y = 0;
+                    }
 
                     //collocated mb in prev frame
-                    pred[5][0] = s->mv_table[1][mb_i][dir][0];
-                    pred[5][1] = s->mv_table[1][mb_i][dir][1];
+                    ADD_PRED(preds[0], s->mv_table[1][mb_i][dir][0], s->mv_table[1][mb_i][dir][1]);
 
                     //accelerator motion vector of collocated block in prev frame
-                    pred[6][0] = s->mv_table[1][mb_i][dir][0] + (s->mv_table[1][mb_i][dir][0] - s->mv_table[2][mb_i][dir][0]);
-                    pred[6][1] = s->mv_table[1][mb_i][dir][1] + (s->mv_table[1][mb_i][dir][1] - s->mv_table[2][mb_i][dir][1]);
-                    pred[6][0] = av_clip(pred[6][0], 0, me_ctx->x_max - 1);
-                    pred[6][1] = av_clip(pred[6][1], 0, me_ctx->y_max - 1);
+                    ADD_PRED(preds[1], s->mv_table[1][mb_i][dir][0] + (s->mv_table[1][mb_i][dir][0] - s->mv_table[2][mb_i][dir][0]),
+                                       s->mv_table[1][mb_i][dir][1] + (s->mv_table[1][mb_i][dir][1] - s->mv_table[2][mb_i][dir][1]));
 
                     //left mb in prev frame
-                    if (mb_x != 0) {
-                        pred[7][0] = s->mv_table[1][mb_x - 1 + mb_y * s->b_width][dir][0];
-                        pred[7][1] = s->mv_table[1][mb_x - 1 + mb_y * s->b_width][dir][1];
-                    }
+                    if (mb_x > 0)
+                        ADD_PRED(preds[1], s->mv_table[1][mb_i - 1][dir][0], s->mv_table[1][mb_i - 1][dir][1]);
 
                     //top mb in prev frame
-                    if (mb_y != 0) {
-                        pred[8][0] = s->mv_table[1][mb_x + (mb_y - 1) * s->b_width][dir][0];
-                        pred[8][1] = s->mv_table[1][mb_x + (mb_y - 1) * s->b_width][dir][1];
-                    }
+                    if (mb_y > 0)
+                        ADD_PRED(preds[1], s->mv_table[1][mb_i - s->b_width][dir][0], s->mv_table[1][mb_i - s->b_width][dir][1]);
 
                     //right mb in prev frame
-                    if (mb_x < s->b_width - 1) {
-                        pred[9][0] = s->mv_table[1][mb_x + 1 + mb_y * s->b_width][dir][0];
-                        pred[9][1] = s->mv_table[1][mb_x + 1 + mb_y * s->b_width][dir][1];
-                    }
+                    if (mb_x + 1 < s->b_width)
+                        ADD_PRED(preds[1], s->mv_table[1][mb_i + 1][dir][0], s->mv_table[1][mb_i + 1][dir][1]);
 
                     //bottom mb in prev frame
-                    if (mb_y < s->b_height - 1) {
-                        pred[10][0] = s->mv_table[1][mb_x + (mb_y + 1) * s->b_width][dir][0];
-                        pred[10][1] = s->mv_table[1][mb_x + (mb_y + 1) * s->b_width][dir][1];
-                    }
+                    if (mb_y + 1 < s->b_height)
+                        ADD_PRED(preds[1], s->mv_table[1][mb_i + s->b_width][dir][0], s->mv_table[1][mb_i + s->b_width][dir][1]);
 
-                    ff_me_search_epzs(me_ctx, pred, x_mb, y_mb, mv);
+                    ff_me_search_epzs(me_ctx, x_mb, y_mb, mv);
 
-                    s->mv_table[0][mb_i][dir][0] = mv[0];
-                    s->mv_table[0][mb_i][dir][1] = mv[1];
+                    s->mv_table[0][mb_i][dir][0] = mv[0] - x_mb;
+                    s->mv_table[0][mb_i][dir][1] = mv[1] - y_mb;
                     add_mv_data(((AVMotionVector *) sd->data) + mv_count++, s->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
                 }
         }

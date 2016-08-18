@@ -270,10 +270,7 @@ uint64_t ff_me_search_ds(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv
         for (i = 0; i < 8; i++)
             COST_P_MV(x + dia[i][0], y + dia[i][1]);
     #else
-        /*
-           this one is slightly faster than above version,
-           it skips previously examined 3 or 5 locations based on prev origin.
-        */
+        /* this version skips previously examined 3 or 5 locations based on prev origin */
         if (dir_x <= 0)
             COST_P_MV(x - 2, y)
         if (dir_x <= 0 && dir_y <= 0)
@@ -337,7 +334,12 @@ uint64_t ff_me_search_hexbs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int 
     return cost_min;
 }
 
-uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int pred[11][2], int x_mb, int y_mb, int *mv)
+/* two subsets of predictors are used
+   me->pred_x|y is set to median of current frame's left, top, top-right
+   set 1: me->preds[0] has: (0, 0), left, top, top-right, collocated block in prev frame
+   set 2: me->preds[1] has: accelerator mv, top, left, right, bottom adj mb of prev frame
+*/
+uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
 {
     int x, y;
     int x_min = FFMAX(0, x_mb - me_ctx->search_param);
@@ -348,23 +350,28 @@ uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int pred[11][2], int x_mb
     uint64_t threshold;
     int i;
 
+    AVMotionEstPredictor *preds = me_ctx->preds;
+
     int dia[8][2] = {{-1, 0}, {-1,-1}, { 0,-1}, { 1,-1},
                      { 1, 0}, { 1, 1}, { 0, 1}, {-1, 1}};
 
     cost_min = UINT64_MAX;
 
-    COST_P_MV(pred[0][0], pred[0][1])
+    COST_P_MV(x_mb + me_ctx->pred_x, y_mb + me_ctx->pred_y)
 
-    if (cost_min > 256) {
+    if (cost_min > 256) { // threshold T1
         threshold = cost_min;
-        for (i = 1; i < 9; i++) {
-            if (i >= 1 && i <= 6)
-                threshold = FFMIN(cost_min, threshold);
+        for (i = 0; i < preds[0].nb; i++) {
+            COST_P_MV(x_mb + preds[0].mvs[i][0], y_mb + preds[0].mvs[i][1])
 
-            COST_P_MV(pred[i][0], pred[i][1])
+            threshold = FFMIN(cost_min, threshold);
+        }
 
+        for (i = 0; i < preds[1].nb; i++) {
             if (cost_min <= 1.2 * threshold + 128)
                 break;
+
+            COST_P_MV(x_mb + preds[1].mvs[i][0], y_mb + preds[1].mvs[i][1])
         }
     }
 
@@ -386,7 +393,14 @@ uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int pred[11][2], int x_mb
     return cost_min;
 }
 
-uint64_t ff_me_search_umh(AVMotionEstContext *me_ctx, int pred[5][2], int x_mb, int y_mb, int *mv)
+/* required predictor order: median, (0,0), left, top, top-right
+   rules when mb not available:
+   replace left with (0, 0)
+   replace top-right with top-left
+   replace top two with left
+   repeated can be skipped, if no predictors are used, set me_ctx->pred to (0,0)
+*/
+uint64_t ff_me_search_umh(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv)
 {
     int x, y;
     int x_min = FFMAX(0, x_mb - me_ctx->search_param);
@@ -397,6 +411,8 @@ uint64_t ff_me_search_umh(AVMotionEstContext *me_ctx, int pred[5][2], int x_mb, 
     int d, i;
     int end_x, end_y;
 
+    AVMotionEstPredictor *pred = &me_ctx->preds[0];
+
     int hex[16][2] = {{-4,-2}, {-4,-1}, {-4, 0}, {-4, 1}, {-4, 2},
                       { 4,-2}, { 4,-1}, { 4, 0}, { 4, 1}, { 4, 2},
                       {-2, 3}, { 0, 4}, { 2, 3},
@@ -406,8 +422,10 @@ uint64_t ff_me_search_umh(AVMotionEstContext *me_ctx, int pred[5][2], int x_mb, 
     int dia2[4][2] = {{-1, 0}, { 0,-1},
                       { 1, 0}, { 0, 1}};
 
-    for (i = 0; i < 5; i++)
-        COST_P_MV(pred[i][0], pred[i][1])
+    COST_P_MV(x_mb + me_ctx->pred_x, y_mb + me_ctx->pred_y);
+
+    for (i = 0; i < pred->nb; i++)
+        COST_P_MV(x_mb + pred->mvs[i][0], y_mb + pred->mvs[i][1])
 
     // Unsymmetrical-cross Search
     x = mv[0];
