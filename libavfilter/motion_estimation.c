@@ -368,8 +368,8 @@ uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
         }
 
         for (i = 0; i < preds[1].nb; i++) {
-            if (cost_min <= 1.2 * threshold + 128)
-                break;
+            //if (cost_min <= 1.2 * threshold + 128)
+            //    break;
 
             COST_P_MV(x_mb + preds[1].mvs[i][0], y_mb + preds[1].mvs[i][1])
         }
