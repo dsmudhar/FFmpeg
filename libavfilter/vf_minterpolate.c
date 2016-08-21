@@ -250,23 +250,21 @@ static int query_formats(AVFilterContext *ctx)
     return ff_set_common_formats(ctx, fmts_list);
 }
 
+#define ABS_CLIP(a, a_mv, a_min, a_max) (a - FFABS(a_mv - a) < a_min ? a_min : (a + FFABS(a_mv - a) > a_max ? a_max : a_mv))
+
 static uint64_t get_sbad(AVMotionEstContext *me_ctx, int x, int y, int x_mv, int y_mv)
 {
     const int linesize = me_ctx->linesize;
     uint8_t *data_cur = me_ctx->data_cur;
     uint8_t *data_next = me_ctx->data_ref;
-    int mv_x = x_mv - x;
-    int mv_y = y_mv - y;
+    int mv_x, mv_y, i, j;
     uint64_t sbad = 0;
-    int i, j;
+
+    mv_x = ABS_CLIP(x, x_mv, 0, me_ctx->width - me_ctx->mb_size) - x;
+    mv_y = ABS_CLIP(y, y_mv, 0, me_ctx->height - me_ctx->mb_size) - y;
 
     data_cur += (y + mv_y) * linesize;
     data_next += (y - mv_y) * linesize;
-
-    if (x - FFABS(mv_x) < 0 || y - FFABS(mv_y) < 0 ||
-        x + FFABS(mv_x) + me_ctx->mb_size > me_ctx->width - 1 ||
-        y + FFABS(mv_y) + me_ctx->mb_size > me_ctx->height - 1)
-        return UINT64_MAX;
 
     for (j = 0; j < me_ctx->mb_size; j++)
         for (i = 0; i < me_ctx->mb_size; i++)
@@ -280,15 +278,25 @@ static uint64_t get_sbad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, 
     const int linesize = me_ctx->linesize;
     uint8_t *data_cur = me_ctx->data_cur;
     uint8_t *data_next = me_ctx->data_ref;
-    int mv_x = x_mv - x;
-    int mv_y = y_mv - y;
+    int mv_x, mv_y, i, j;
     uint64_t sbad = 0;
-    int i, j;
 
-    if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0 || y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0 ||
+    mv_x = ABS_CLIP(x, x_mv, 0, me_ctx->width - me_ctx->mb_size) - x;
+    mv_y = ABS_CLIP(y, y_mv, 0, me_ctx->height - me_ctx->mb_size) - y;
+
+    if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0)
+        x += me_ctx->mb_size / 2;
+    else if (x + FFABS(mv_x) + me_ctx->mb_size * 3 / 2 > me_ctx->width)
+        x -= me_ctx->mb_size / 2;
+    if (y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0)
+        y += me_ctx->mb_size / 2;
+    else if (y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height)
+        y -= me_ctx->mb_size / 2;
+
+    /*if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0 || y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0 ||
         x + FFABS(mv_x) + me_ctx->mb_size * 3 / 2 > me_ctx->width - 1 ||
         y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height - 1)
-        return UINT64_MAX;
+        return UINT64_MAX;*/
 
     for (j = -me_ctx->mb_size / 2; j < me_ctx->mb_size * 3 / 2; j++)
         for (i = -me_ctx->mb_size / 2; i < me_ctx->mb_size * 3 / 2; i++)
@@ -302,15 +310,25 @@ static uint64_t get_sad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, i
     const int linesize = me_ctx->linesize;
     uint8_t *data_ref = me_ctx->data_ref;
     uint8_t *data_cur = me_ctx->data_cur;
-    int mv_x = x_mv - x;
-    int mv_y = y_mv - y;
+    int mv_x, mv_y, i, j;
     uint64_t sad = 0;
-    int i, j;
 
-    if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0 || y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0 ||
+    mv_x = ABS_CLIP(x, x_mv, 0, me_ctx->width - me_ctx->mb_size) - x;
+    mv_y = ABS_CLIP(y, y_mv, 0, me_ctx->height - me_ctx->mb_size) - y;
+
+    if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0)
+        x += me_ctx->mb_size / 2;
+    else if (x + FFABS(mv_x) + me_ctx->mb_size * 3 / 2 > me_ctx->width)
+        x -= me_ctx->mb_size / 2;
+    if (y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0)
+        y += me_ctx->mb_size / 2;
+    else if (y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height)
+        y -= me_ctx->mb_size / 2;
+
+    /*if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0 || y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0 ||
         x + FFABS(mv_x) + me_ctx->mb_size * 3 / 2 > me_ctx->width - 1 ||
         y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height - 1)
-        return UINT64_MAX;
+        return UINT64_MAX;*/
 
     for (j = -me_ctx->mb_size / 2; j < me_ctx->mb_size * 3 / 2; j++)
         for (i = -me_ctx->mb_size / 2; i < me_ctx->mb_size * 3 / 2; i++)
