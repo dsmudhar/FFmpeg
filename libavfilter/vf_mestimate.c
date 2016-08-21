@@ -96,8 +96,8 @@ static int config_input(AVFilterLink *inlink)
     s->log2_mb_size = av_ceil_log2_c(s->mb_size);
     s->mb_size = 1 << s->log2_mb_size;
 
-    s->b_width  = AV_CEIL_RSHIFT(inlink->w, s->log2_mb_size); //XXX how's inlink->w different from frame->width
-    s->b_height = AV_CEIL_RSHIFT(inlink->h, s->log2_mb_size);
+    s->b_width  = inlink->w >> s->log2_mb_size;
+    s->b_height = inlink->h >> s->log2_mb_size;
     s->b_count = s->b_width * s->b_height;
 
     for (i = 0; i < 3; i++) {
@@ -106,7 +106,7 @@ static int config_input(AVFilterLink *inlink)
             return AVERROR(ENOMEM);
     }
 
-    ff_me_init_context(&s->me_ctx, s->mb_size, s->search_param, inlink->w, inlink->h);
+    ff_me_init_context(&s->me_ctx, s->mb_size, s->search_param, inlink->w, inlink->h, 0, s->b_width << s->log2_mb_size, 0, s->b_height << s->log2_mb_size);
 
     return 0;
 }
