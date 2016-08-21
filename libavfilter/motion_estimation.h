@@ -63,7 +63,7 @@ typedef struct AVMotionEstContext {
 
 void ff_me_init_context(AVMotionEstContext *me_ctx, int mb_size, int search_param, int width, int height);
 
-uint64_t get_sad(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int x_mv, int y_mv);
+uint64_t ff_me_cmp_sad(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int x_mv, int y_mv);
 
 uint64_t ff_me_search_esa(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv);
 
