@@ -106,7 +106,7 @@ static int config_input(AVFilterLink *inlink)
             return AVERROR(ENOMEM);
     }
 
-    ff_me_init_context(&s->me_ctx, s->mb_size, s->search_param, inlink->w, inlink->h, 0, s->b_width << s->log2_mb_size, 0, s->b_height << s->log2_mb_size);
+    ff_me_init_context(&s->me_ctx, s->mb_size, s->search_param, inlink->w, inlink->h, 0, (s->b_width - 1) << s->log2_mb_size, 0, (s->b_height - 1) << s->log2_mb_size);
 
     return 0;
 }
