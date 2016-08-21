@@ -260,8 +260,8 @@ static uint64_t get_sbad(AVMotionEstContext *me_ctx, int x, int y, int x_mv, int
     int mv_x, mv_y, i, j;
     uint64_t sbad = 0;
 
-    mv_x = ABS_CLIP(x, x_mv, 0, me_ctx->width - me_ctx->mb_size) - x;
-    mv_y = ABS_CLIP(y, y_mv, 0, me_ctx->height - me_ctx->mb_size) - y;
+    mv_x = ABS_CLIP(x, x_mv, me_ctx->x_min, me_ctx->x_max) - x;
+    mv_y = ABS_CLIP(y, y_mv, me_ctx->y_min, me_ctx->y_max) - y;
 
     data_cur += (y + mv_y) * linesize;
     data_next += (y - mv_y) * linesize;
@@ -281,22 +281,17 @@ static uint64_t get_sbad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, 
     int mv_x, mv_y, i, j;
     uint64_t sbad = 0;
 
-    mv_x = ABS_CLIP(x, x_mv, 0, me_ctx->width - me_ctx->mb_size) - x;
-    mv_y = ABS_CLIP(y, y_mv, 0, me_ctx->height - me_ctx->mb_size) - y;
+    mv_x = ABS_CLIP(x, x_mv, me_ctx->x_min, me_ctx->x_max) - x;
+    mv_y = ABS_CLIP(y, y_mv, me_ctx->y_min, me_ctx->y_max) - y;
 
-    if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0)
+    if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < me_ctx->x_min)
         x += me_ctx->mb_size / 2;
-    else if (x + FFABS(mv_x) + me_ctx->mb_size * 3 / 2 > me_ctx->width)
+    else if (x + FFABS(mv_x) + me_ctx->mb_size / 2 > me_ctx->x_max)
         x -= me_ctx->mb_size / 2;
-    if (y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0)
+    if (y - FFABS(mv_y) - me_ctx->mb_size / 2 < me_ctx->y_min)
         y += me_ctx->mb_size / 2;
-    else if (y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height)
+    else if (y + FFABS(mv_y) + me_ctx->mb_size / 2 > me_ctx->y_max)
         y -= me_ctx->mb_size / 2;
-
-    /*if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0 || y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0 ||
-        x + FFABS(mv_x) + me_ctx->mb_size * 3 / 2 > me_ctx->width - 1 ||
-        y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height - 1)
-        return UINT64_MAX;*/
 
     for (j = -me_ctx->mb_size / 2; j < me_ctx->mb_size * 3 / 2; j++)
         for (i = -me_ctx->mb_size / 2; i < me_ctx->mb_size * 3 / 2; i++)
@@ -313,8 +308,8 @@ static uint64_t get_sad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, i
     int mv_x, mv_y, i, j;
     uint64_t sad = 0;
 
-    mv_x = ABS_CLIP(x, x_mv, 0, me_ctx->width - me_ctx->mb_size) - x;
-    mv_y = ABS_CLIP(y, y_mv, 0, me_ctx->height - me_ctx->mb_size) - y;
+    mv_x = ABS_CLIP(x, x_mv, me_ctx->x_min, me_ctx->x_max) - x;
+    mv_y = ABS_CLIP(y, y_mv, me_ctx->y_min, me_ctx->y_max) - y;
 
     if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0)
         x += me_ctx->mb_size / 2;
@@ -324,11 +319,6 @@ static uint64_t get_sad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, i
         y += me_ctx->mb_size / 2;
     else if (y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height)
         y -= me_ctx->mb_size / 2;
-
-    /*if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0 || y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0 ||
-        x + FFABS(mv_x) + me_ctx->mb_size * 3 / 2 > me_ctx->width - 1 ||
-        y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height - 1)
-        return UINT64_MAX;*/
 
     for (j = -me_ctx->mb_size / 2; j < me_ctx->mb_size * 3 / 2; j++)
         for (i = -me_ctx->mb_size / 2; i < me_ctx->mb_size * 3 / 2; i++)
@@ -356,8 +346,8 @@ static int config_input(AVFilterLink *inlink)
     mi_ctx->log2_mb_size = av_ceil_log2_c(mi_ctx->mb_size);
     mi_ctx->mb_size = 1 << mi_ctx->log2_mb_size;
 
-    mi_ctx->b_width  = AV_CEIL_RSHIFT(width,  mi_ctx->log2_mb_size);
-    mi_ctx->b_height = AV_CEIL_RSHIFT(height, mi_ctx->log2_mb_size);
+    mi_ctx->b_width  = width >> mi_ctx->log2_mb_size;
+    mi_ctx->b_height = height >> mi_ctx->log2_mb_size;
     mi_ctx->b_count = mi_ctx->b_width * mi_ctx->b_height;
 
     for (i = 0; i < NB_FRAMES; i++) {
@@ -388,7 +378,7 @@ static int config_input(AVFilterLink *inlink)
     if (!mi_ctx->sad)
         return AVERROR(EINVAL);
 
-    ff_me_init_context(me_ctx, mi_ctx->mb_size, mi_ctx->search_param, width, height);
+    ff_me_init_context(me_ctx, mi_ctx->mb_size, mi_ctx->search_param, width, height, 0, (mi_ctx->b_width - 1) << mi_ctx->log2_mb_size, 0, (mi_ctx->b_height - 1) << mi_ctx->log2_mb_size);
 
     if (mi_ctx->me_mode == ME_MODE_BIDIR)
         me_ctx->get_cost = &get_sad_ob;
