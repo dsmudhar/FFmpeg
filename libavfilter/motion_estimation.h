@@ -50,7 +50,9 @@ typedef struct AVMotionEstContext {
     int width;
     int height;
 
+    int x_min;
     int x_max;
+    int y_min;
     int y_max;
 
     int pred_x;     ///< median predictor x
@@ -61,7 +63,8 @@ typedef struct AVMotionEstContext {
                          int mv_x, int mv_y);
 } AVMotionEstContext;
 
-void ff_me_init_context(AVMotionEstContext *me_ctx, int mb_size, int search_param, int width, int height);
+void ff_me_init_context(AVMotionEstContext *me_ctx, int mb_size, int search_param,
+                        int width, int height, int x_min, int x_max, int y_min, int y_max);
 
 uint64_t ff_me_cmp_sad(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int x_mv, int y_mv);
 
