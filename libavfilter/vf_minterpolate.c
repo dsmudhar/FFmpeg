@@ -928,18 +928,8 @@ static void obmc(MIContext *mi_ctx, int alpha)
     int mb_y, mb_x, dir;
 
     for (y = 0; y < height; y++)
-        for (x = 0; x < width; x++) {
-            Pixel *pixel = &mi_ctx->pixels[x + y * width];
-            pixel->weights[0] = ALPHA_MAX - alpha;
-            pixel->refs[0] = 1;
-            pixel->mvs[0][0] = 0;
-            pixel->mvs[0][1] = 0;
-            pixel->weights[1] = alpha;
-            pixel->refs[1] = 2;
-            pixel->mvs[1][0] = 0;
-            pixel->mvs[1][1] = 0;
-            pixel->nb = 2;
-        }
+        for (x = 0; x < width; x++)
+            mi_ctx->pixels[x + y * width].nb = 0;
 
     for (dir = 0; dir < 2; dir++)
         for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
