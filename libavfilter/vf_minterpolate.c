@@ -32,6 +32,8 @@
 #include "internal.h"
 #include "video.h"
 
+#define COST_PRED_SCALE 64
+
 #define ME_MODE_BIDIR 0
 #define ME_MODE_BILAT 1
 
@@ -250,18 +252,20 @@ static int query_formats(AVFilterContext *ctx)
     return ff_set_common_formats(ctx, fmts_list);
 }
 
-#define ABS_CLIP(a, a_mv, a_min, a_max) (a - FFABS(a_mv - a) < a_min ? a_min : (a + FFABS(a_mv - a) > a_max ? a_max : a_mv))
-
 static uint64_t get_sbad(AVMotionEstContext *me_ctx, int x, int y, int x_mv, int y_mv)
 {
-    const int linesize = me_ctx->linesize;
     uint8_t *data_cur = me_ctx->data_cur;
     uint8_t *data_next = me_ctx->data_ref;
+    int linesize = me_ctx->linesize;
+    int mv_x1 = x_mv - x;
+    int mv_y1 = y_mv - y;
     int mv_x, mv_y, i, j;
     uint64_t sbad = 0;
 
-    mv_x = ABS_CLIP(x, x_mv, me_ctx->x_min, me_ctx->x_max) - x;
-    mv_y = ABS_CLIP(y, y_mv, me_ctx->y_min, me_ctx->y_max) - y;
+    x = av_clip(x, me_ctx->x_min, me_ctx->x_max);
+    y = av_clip(y, me_ctx->y_min, me_ctx->y_max);
+    mv_x = av_clip(x_mv - x, -FFMIN(x - me_ctx->x_min, me_ctx->x_max - x), FFMIN(x - me_ctx->x_min, me_ctx->x_max - x));
+    mv_y = av_clip(y_mv - y, -FFMIN(y - me_ctx->y_min, me_ctx->y_max - y), FFMIN(y - me_ctx->y_min, me_ctx->y_max - y));
 
     data_cur += (y + mv_y) * linesize;
     data_next += (y - mv_y) * linesize;
@@ -270,61 +274,59 @@ static uint64_t get_sbad(AVMotionEstContext *me_ctx, int x, int y, int x_mv, int
         for (i = 0; i < me_ctx->mb_size; i++)
             sbad += FFABS(data_cur[x + mv_x + i + j * linesize] - data_next[x - mv_x + i + j * linesize]);
 
-    return sbad + (FFABS(mv_x - me_ctx->pred_x) + FFABS(mv_y - me_ctx->pred_y)) * 64;
+    return sbad + (FFABS(mv_x1 - me_ctx->pred_x) + FFABS(mv_y1 - me_ctx->pred_y)) * COST_PRED_SCALE;
 }
 
 static uint64_t get_sbad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, int y_mv)
 {
-    const int linesize = me_ctx->linesize;
     uint8_t *data_cur = me_ctx->data_cur;
     uint8_t *data_next = me_ctx->data_ref;
+    int linesize = me_ctx->linesize;
+    int x_min = me_ctx->x_min + me_ctx->mb_size / 2;
+    int x_max = me_ctx->x_max - me_ctx->mb_size / 2;
+    int y_min = me_ctx->y_min + me_ctx->mb_size / 2;
+    int y_max = me_ctx->y_max - me_ctx->mb_size / 2;
+    int mv_x1 = x_mv - x;
+    int mv_y1 = y_mv - y;
     int mv_x, mv_y, i, j;
     uint64_t sbad = 0;
 
-    mv_x = ABS_CLIP(x, x_mv, me_ctx->x_min, me_ctx->x_max) - x;
-    mv_y = ABS_CLIP(y, y_mv, me_ctx->y_min, me_ctx->y_max) - y;
-
-    if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < me_ctx->x_min)
-        x += me_ctx->mb_size / 2;
-    else if (x + FFABS(mv_x) + me_ctx->mb_size / 2 > me_ctx->x_max)
-        x -= me_ctx->mb_size / 2;
-    if (y - FFABS(mv_y) - me_ctx->mb_size / 2 < me_ctx->y_min)
-        y += me_ctx->mb_size / 2;
-    else if (y + FFABS(mv_y) + me_ctx->mb_size / 2 > me_ctx->y_max)
-        y -= me_ctx->mb_size / 2;
+    x = av_clip(x, x_min, x_max);
+    y = av_clip(y, y_min, y_max);
+    mv_x = av_clip(x_mv - x, -FFMIN(x - x_min, x_max - x), FFMIN(x - x_min, x_max - x));
+    mv_y = av_clip(y_mv - y, -FFMIN(y - y_min, y_max - y), FFMIN(y - y_min, y_max - y));
 
     for (j = -me_ctx->mb_size / 2; j < me_ctx->mb_size * 3 / 2; j++)
         for (i = -me_ctx->mb_size / 2; i < me_ctx->mb_size * 3 / 2; i++)
             sbad += FFABS(data_cur[x + mv_x + i + (y + mv_y + j) * linesize] - data_next[x - mv_x + i + (y - mv_y + j) * linesize]);
 
-    return sbad + (FFABS(mv_x - me_ctx->pred_x) + FFABS(mv_y - me_ctx->pred_y)) * 64;
+    return sbad + (FFABS(mv_x1 - me_ctx->pred_x) + FFABS(mv_y1 - me_ctx->pred_y)) * COST_PRED_SCALE;
 }
 
 static uint64_t get_sad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, int y_mv)
 {
-    const int linesize = me_ctx->linesize;
     uint8_t *data_ref = me_ctx->data_ref;
     uint8_t *data_cur = me_ctx->data_cur;
-    int mv_x, mv_y, i, j;
+    int linesize = me_ctx->linesize;
+    int x_min = me_ctx->x_min + me_ctx->mb_size / 2;
+    int x_max = me_ctx->x_max - me_ctx->mb_size / 2;
+    int y_min = me_ctx->y_min + me_ctx->mb_size / 2;
+    int y_max = me_ctx->y_max - me_ctx->mb_size / 2;
+    int mv_x = x_mv - x;
+    int mv_y = y_mv - y;
+    int i, j;
     uint64_t sad = 0;
 
-    mv_x = ABS_CLIP(x, x_mv, me_ctx->x_min, me_ctx->x_max) - x;
-    mv_y = ABS_CLIP(y, y_mv, me_ctx->y_min, me_ctx->y_max) - y;
-
-    if (x - FFABS(mv_x) - me_ctx->mb_size / 2 < 0)
-        x += me_ctx->mb_size / 2;
-    else if (x + FFABS(mv_x) + me_ctx->mb_size * 3 / 2 > me_ctx->width)
-        x -= me_ctx->mb_size / 2;
-    if (y - FFABS(mv_y) - me_ctx->mb_size / 2 < 0)
-        y += me_ctx->mb_size / 2;
-    else if (y + FFABS(mv_y) + me_ctx->mb_size * 3 / 2 > me_ctx->height)
-        y -= me_ctx->mb_size / 2;
+    x = av_clip(x, x_min, x_max);
+    y = av_clip(y, y_min, y_max);
+    x_mv = av_clip(x_mv, x_min, x_max);
+    y_mv = av_clip(y_mv, y_min, y_max);
 
     for (j = -me_ctx->mb_size / 2; j < me_ctx->mb_size * 3 / 2; j++)
         for (i = -me_ctx->mb_size / 2; i < me_ctx->mb_size * 3 / 2; i++)
             sad += FFABS(data_ref[x_mv + i + (y_mv + j) * linesize] - data_cur[x + i + (y + j) * linesize]);
 
-    return sad + (FFABS(mv_x - me_ctx->pred_x) + FFABS(mv_y - me_ctx->pred_y)) * 64;
+    return sad + (FFABS(mv_x - me_ctx->pred_x) + FFABS(mv_y - me_ctx->pred_y)) * COST_PRED_SCALE;
 }
 
 static int config_input(AVFilterLink *inlink)
