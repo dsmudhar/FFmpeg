@@ -32,13 +32,14 @@
 #include "internal.h"
 #include "video.h"
 
-#define COST_PRED_SCALE 64
-
 #define ME_MODE_BIDIR 0
 #define ME_MODE_BILAT 1
 
 #define MC_MODE_OBMC 0
 #define MC_MODE_AOBMC 1
+
+#define SCD_METHOD_NONE 0
+#define SCD_METHOD_FDIFF 1
 
 //TESTS
 #define DEBUG_CLUSTERING 0
@@ -54,6 +55,7 @@
 #define CLUSTER_THRESHOLD 4
 #define ROUGHNESS 32
 #define PX_WEIGHT_MAX 255
+#define COST_PRED_SCALE 64
 
 static const uint8_t obmc_linear32[1024] = {
   0,  0,  0,  0,  4,  4,  4,  4,  4,  4,  4,  4,  8,  8,  8,  8,  8,  8,  8,  8,  4,  4,  4,  4,  4,  4,  4,  4,  0,  0,  0,  0,
@@ -183,9 +185,11 @@ typedef struct MIContext {
     int b_width, b_height, b_count;
     int log2_mb_size;
 
+    int scd_method;
+    int scene_changed;
     av_pixelutils_sad_fn sad;
     double prev_mafd;
-    int scene_changed;
+    double scd_threshold;
 
     int chroma_height;
     int chroma_width;
@@ -202,6 +206,7 @@ typedef struct MIContext {
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption minterpolate_options[] = {
+    { "fps", "specify the frame rate", OFFSET(frame_rate), AV_OPT_TYPE_VIDEO_RATE, {.str = "60"}, 0, INT_MAX, FLAGS },
     { "mi_mode", "specify the interpolation mode", OFFSET(mi_mode), AV_OPT_TYPE_INT, {.i64 = MI_MODE_MCI}, MI_MODE_DUP, MI_MODE_MCI, FLAGS, "mi_mode" },
         CONST("dup",    "duplicate frames",                     MI_MODE_DUP,            "mi_mode"),
         CONST("blend",  "blend frames",                         MI_MODE_BLEND,          "mi_mode"),
@@ -213,20 +218,22 @@ static const AVOption minterpolate_options[] = {
         CONST("bidir",  "bidirectional motion estimation",      ME_MODE_BIDIR,          "me_mode"),
         CONST("bilat",  "bilateral motion estimation",          ME_MODE_BILAT,          "me_mode"),
     { "me", "specify motion estimation method", OFFSET(me_method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_UMH}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "me" },
-        CONST("esa",    "exhaustive search",                    AV_ME_METHOD_ESA,        "me"),
-        CONST("tss",    "three step search",                    AV_ME_METHOD_TSS,        "me"),
-        CONST("tdls",   "two dimensional logarithmic search",   AV_ME_METHOD_TDLS,       "me"),
-        CONST("ntss",   "new three step search",                AV_ME_METHOD_NTSS,       "me"),
-        CONST("fss",    "four step search",                     AV_ME_METHOD_FSS,        "me"),
-        CONST("ds",     "diamond search",                       AV_ME_METHOD_DS,         "me"),
-        CONST("hexbs",  "hexagon-based search",                 AV_ME_METHOD_HEXBS,      "me"),
-        CONST("epzs",   "enhanced predictive zonal search",     AV_ME_METHOD_EPZS,       "me"),
-        CONST("umh",    "uneven multi-hexagon search",          AV_ME_METHOD_UMH,        "me"),
-
-    { "fps", "specify the frame rate", OFFSET(frame_rate), AV_OPT_TYPE_VIDEO_RATE, {.str = "60"}, 0, INT_MAX, FLAGS },
+        CONST("esa",    "exhaustive search",                    AV_ME_METHOD_ESA,       "me"),
+        CONST("tss",    "three step search",                    AV_ME_METHOD_TSS,       "me"),
+        CONST("tdls",   "two dimensional logarithmic search",   AV_ME_METHOD_TDLS,      "me"),
+        CONST("ntss",   "new three step search",                AV_ME_METHOD_NTSS,      "me"),
+        CONST("fss",    "four step search",                     AV_ME_METHOD_FSS,       "me"),
+        CONST("ds",     "diamond search",                       AV_ME_METHOD_DS,        "me"),
+        CONST("hexbs",  "hexagon-based search",                 AV_ME_METHOD_HEXBS,     "me"),
+        CONST("epzs",   "enhanced predictive zonal search",     AV_ME_METHOD_EPZS,      "me"),
+        CONST("umh",    "uneven multi-hexagon search",          AV_ME_METHOD_UMH,       "me"),
     { "mb_size", "specify the macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 4, 16, FLAGS },
     { "search_param", "specify search parameter", OFFSET(search_param), AV_OPT_TYPE_INT, {.i64 = 32}, 4, INT_MAX, FLAGS },
     { "vsbmc", "variable-size block motion compensation", OFFSET(vsbmc), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
+    { "scd", "scene change detection method", OFFSET(scd_method), AV_OPT_TYPE_INT, {.i64 = SCD_METHOD_FDIFF}, SCD_METHOD_NONE, SCD_METHOD_FDIFF, FLAGS, "scene" },
+        CONST("none",   "disable detection",                    SCD_METHOD_NONE,        "scene"),
+        CONST("fdiff",  "frame difference",                     SCD_METHOD_FDIFF,       "scene"),
+    { "scd_threshold", "scene change threshold", OFFSET(scd_threshold), AV_OPT_TYPE_DOUBLE, {.dbl = 5.0}, 0, 100.0, FLAGS },
     { NULL }
 };
 
@@ -376,9 +383,11 @@ static int config_input(AVFilterLink *inlink)
         }
     }
 
-    mi_ctx->sad = av_pixelutils_get_sad_fn(3, 3, 2, mi_ctx);
-    if (!mi_ctx->sad)
-        return AVERROR(EINVAL);
+    if (mi_ctx->scd_method == SCD_METHOD_FDIFF) {
+        mi_ctx->sad = av_pixelutils_get_sad_fn(3, 3, 2, mi_ctx);
+        if (!mi_ctx->sad)
+            return AVERROR(EINVAL);
+    }
 
     ff_me_init_context(me_ctx, mi_ctx->mb_size, mi_ctx->search_param, width, height, 0, (mi_ctx->b_width - 1) << mi_ctx->log2_mb_size, 0, (mi_ctx->b_height - 1) << mi_ctx->log2_mb_size);
 
@@ -861,22 +870,27 @@ static int detect_scene_change(MIContext *mi_ctx)
     AVMotionEstContext *me_ctx = &mi_ctx->me_ctx;
     int x, y;
     int linesize = me_ctx->linesize;
-    double ret = 0, mafd, diff;
-    int64_t sad;
     uint8_t *p1 = mi_ctx->frames[1].avf->data[0];
     uint8_t *p2 = mi_ctx->frames[2].avf->data[0];
 
-    for (sad = y = 0; y < me_ctx->height; y += 8)
-        for (x = 0; x < linesize; x += 8)
-            sad += mi_ctx->sad(p1 + x + y * linesize, linesize, p2 + x + y * linesize, linesize);
+    if (mi_ctx->scd_method == SCD_METHOD_FDIFF) {
+        double ret = 0, mafd, diff;
+        int64_t sad;
 
-    emms_c();
-    mafd = (double) sad / (me_ctx->height * me_ctx->width * 3);
-    diff = fabs(mafd - mi_ctx->prev_mafd);
-    ret  = av_clipf(FFMIN(mafd, diff), 0, 100.0);
-    mi_ctx->prev_mafd = mafd;
+        for (sad = y = 0; y < me_ctx->height; y += 8)
+            for (x = 0; x < linesize; x += 8)
+                sad += mi_ctx->sad(p1 + x + y * linesize, linesize, p2 + x + y * linesize, linesize);
 
-    return ret >= 5; //TODO add option
+        emms_c();
+        mafd = (double) sad / (me_ctx->height * me_ctx->width * 3);
+        diff = fabs(mafd - mi_ctx->prev_mafd);
+        ret  = av_clipf(FFMIN(mafd, diff), 0, 100.0);
+        mi_ctx->prev_mafd = mafd;
+
+        return ret >= mi_ctx->scd_threshold;
+    }
+
+    return 0;
 }
 
 static int get_roughness(MIContext *mi_ctx, int mb_x, int mb_y, int mv_x, int mv_y, int dir)
