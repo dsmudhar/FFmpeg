@@ -23,16 +23,16 @@
 
 #include "libavutil/avutil.h"
 
-enum MEMethod {
-    ME_METHOD_ESA           = 1,
-    ME_METHOD_TSS           = 2,
-    ME_METHOD_TDLS          = 3,
-    ME_METHOD_NTSS          = 4,
-    ME_METHOD_FSS           = 5,
-    ME_METHOD_DS            = 6,
-    ME_METHOD_HEXBS         = 7,
-    ME_METHOD_EPZS          = 8,    
-    ME_METHOD_UMH           = 9,
+enum AVMotionEstMethod {
+    AV_ME_METHOD_ESA        = 1,
+    AV_ME_METHOD_TSS        = 2,
+    AV_ME_METHOD_TDLS       = 3,
+    AV_ME_METHOD_NTSS       = 4,
+    AV_ME_METHOD_FSS        = 5,
+    AV_ME_METHOD_DS         = 6,
+    AV_ME_METHOD_HEXBS      = 7,
+    AV_ME_METHOD_EPZS       = 8,    
+    AV_ME_METHOD_UMH        = 9,
 };
 
 typedef struct AVMotionEstPredictor {

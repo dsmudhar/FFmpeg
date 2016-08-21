@@ -34,7 +34,7 @@
 typedef struct MEContext {
     const AVClass *class;
     AVMotionEstContext me_ctx;
-    enum MEMethod method;               ///< motion estimation method
+    enum AVMotionEstMethod method;      ///< motion estimation method
 
     int mb_size;                        ///< macroblock size
     int search_param;                   ///< search parameter
@@ -51,16 +51,16 @@ typedef struct MEContext {
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption mestimate_options[] = {
-    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = ME_METHOD_ESA}, ME_METHOD_ESA, ME_METHOD_UMH, FLAGS, "method" },
-        CONST("esa",   "exhaustive search",                  ME_METHOD_ESA,   "method"),
-        CONST("tss",   "three step search",                  ME_METHOD_TSS,   "method"),
-        CONST("tdls",  "two dimensional logarithmic search", ME_METHOD_TDLS,  "method"),
-        CONST("ntss",  "new three step search",              ME_METHOD_NTSS,  "method"),
-        CONST("fss",   "four step search",                   ME_METHOD_FSS,   "method"),
-        CONST("ds",    "diamond search",                     ME_METHOD_DS,    "method"),
-        CONST("hexbs", "hexagon-based search",               ME_METHOD_HEXBS, "method"),
-        CONST("epzs",  "enhanced predictive zonal search",   ME_METHOD_EPZS,  "method"),
-        CONST("umh",   "uneven multi-hexagon search",        ME_METHOD_UMH,   "method"),
+    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_ESA}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "method" },
+        CONST("esa",   "exhaustive search",                  AV_ME_METHOD_ESA,      "method"),
+        CONST("tss",   "three step search",                  AV_ME_METHOD_TSS,      "method"),
+        CONST("tdls",  "two dimensional logarithmic search", AV_ME_METHOD_TDLS,     "method"),
+        CONST("ntss",  "new three step search",              AV_ME_METHOD_NTSS,     "method"),
+        CONST("fss",   "four step search",                   AV_ME_METHOD_FSS,      "method"),
+        CONST("ds",    "diamond search",                     AV_ME_METHOD_DS,       "method"),
+        CONST("hexbs", "hexagon-based search",               AV_ME_METHOD_HEXBS,    "method"),
+        CONST("epzs",  "enhanced predictive zonal search",   AV_ME_METHOD_EPZS,     "method"),
+        CONST("umh",   "uneven multi-hexagon search",        AV_ME_METHOD_UMH,      "method"),
     { "mb_size", "specify macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 8, INT_MAX, FLAGS },
     { "search_param", "specify search parameter", OFFSET(search_param), AV_OPT_TYPE_INT, {.i64 = 7}, 4, INT_MAX, FLAGS },
     { NULL }
@@ -190,21 +190,21 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
     for (dir = 0; dir < 2; dir++) {
         me_ctx->data_ref = (dir ? s->next : s->prev)->data[0];
 
-        if (s->method == ME_METHOD_DS)
+        if (s->method == AV_ME_METHOD_DS)
             SEARCH_MV(ds);
-        else if (s->method == ME_METHOD_ESA)
+        else if (s->method == AV_ME_METHOD_ESA)
             SEARCH_MV(esa);
-        else if (s->method == ME_METHOD_FSS)
+        else if (s->method == AV_ME_METHOD_FSS)
             SEARCH_MV(fss);
-        else if (s->method == ME_METHOD_NTSS)
+        else if (s->method == AV_ME_METHOD_NTSS)
             SEARCH_MV(ntss);
-        else if (s->method == ME_METHOD_TDLS)
+        else if (s->method == AV_ME_METHOD_TDLS)
             SEARCH_MV(tdls);
-        else if (s->method == ME_METHOD_TSS)
+        else if (s->method == AV_ME_METHOD_TSS)
             SEARCH_MV(tss);
-        else if (s->method == ME_METHOD_HEXBS)
+        else if (s->method == AV_ME_METHOD_HEXBS)
             SEARCH_MV(hexbs);
-        else if (s->method == ME_METHOD_UMH) {
+        else if (s->method == AV_ME_METHOD_UMH) {
             for (mb_y = 0; mb_y < s->b_height; mb_y++)
                 for (mb_x = 0; mb_x < s->b_width; mb_x++) {
                     const int mb_i = mb_x + mb_y * s->b_width;
@@ -255,7 +255,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
                     add_mv_data(((AVMotionVector *) sd->data) + mv_count++, me_ctx->mb_size, x_mb, y_mb, mv[0], mv[1], dir);
                 }
 
-        } else if (s->method == ME_METHOD_EPZS) {
+        } else if (s->method == AV_ME_METHOD_EPZS) {
 
             for (mb_y = 0; mb_y < s->b_height; mb_y++)
                 for (mb_x = 0; mb_x < s->b_width; mb_x++) {

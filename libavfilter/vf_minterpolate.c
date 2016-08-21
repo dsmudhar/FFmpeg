@@ -163,9 +163,9 @@ typedef struct Frame {
 typedef struct MIContext {
     const AVClass *class;
     AVMotionEstContext me_ctx;
+    enum AVMotionEstMethod me_method;
     AVRational frame_rate;
     enum MIMode mi_mode;
-    enum MEMethod me_method;
     int mc_mode;
     int me_mode;
     int mb_size;
@@ -210,16 +210,16 @@ static const AVOption minterpolate_options[] = {
     { "me_mode", "specify the motion estimation mode", OFFSET(me_mode), AV_OPT_TYPE_INT, {.i64 = ME_MODE_BILAT}, ME_MODE_BIDIR, ME_MODE_BILAT, FLAGS, "me_mode" },
         CONST("bidir",  "bidirectional motion estimation",      ME_MODE_BIDIR,          "me_mode"),
         CONST("bilat",  "bilateral motion estimation",          ME_MODE_BILAT,          "me_mode"),
-    { "me", "specify motion estimation method", OFFSET(me_method), AV_OPT_TYPE_INT, {.i64 = ME_METHOD_UMH}, ME_METHOD_ESA, ME_METHOD_UMH, FLAGS, "me" },
-        CONST("esa",    "exhaustive search",                    ME_METHOD_ESA,          "me"),
-        CONST("tss",    "three step search",                    ME_METHOD_TSS,          "me"),
-        CONST("tdls",   "two dimensional logarithmic search",   ME_METHOD_TDLS,         "me"),
-        CONST("ntss",   "new three step search",                ME_METHOD_NTSS,         "me"),
-        CONST("fss",    "four step search",                     ME_METHOD_FSS,          "me"),
-        CONST("ds",     "diamond search",                       ME_METHOD_DS,           "me"),
-        CONST("hexbs",  "hexagon-based search",                 ME_METHOD_HEXBS,        "me"),
-        CONST("epzs",   "enhanced predictive zonal search",     ME_METHOD_EPZS,         "me"),
-        CONST("umh",    "uneven multi-hexagon search",          ME_METHOD_UMH,          "me"),
+    { "me", "specify motion estimation method", OFFSET(me_method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_UMH}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "me" },
+        CONST("esa",    "exhaustive search",                    AV_ME_METHOD_ESA,        "me"),
+        CONST("tss",    "three step search",                    AV_ME_METHOD_TSS,        "me"),
+        CONST("tdls",   "two dimensional logarithmic search",   AV_ME_METHOD_TDLS,       "me"),
+        CONST("ntss",   "new three step search",                AV_ME_METHOD_NTSS,       "me"),
+        CONST("fss",    "four step search",                     AV_ME_METHOD_FSS,        "me"),
+        CONST("ds",     "diamond search",                       AV_ME_METHOD_DS,         "me"),
+        CONST("hexbs",  "hexagon-based search",                 AV_ME_METHOD_HEXBS,      "me"),
+        CONST("epzs",   "enhanced predictive zonal search",     AV_ME_METHOD_EPZS,       "me"),
+        CONST("umh",    "uneven multi-hexagon search",          AV_ME_METHOD_UMH,        "me"),
 
     { "fps", "specify the frame rate", OFFSET(frame_rate), AV_OPT_TYPE_VIDEO_RATE, {.str = "60"}, 0, INT_MAX, FLAGS },
     { "mb_size", "specify the macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 4, 16, FLAGS },
@@ -357,7 +357,7 @@ static int config_input(AVFilterLink *inlink)
             if (!(mi_ctx->int_blocks = av_mallocz_array(mi_ctx->b_count, sizeof(Block))))
                 return AVERROR(ENOMEM);
 
-        if (mi_ctx->me_method == ME_METHOD_EPZS) {
+        if (mi_ctx->me_method == AV_ME_METHOD_EPZS) {
             for (i = 0; i < 3; i++) {
                 mi_ctx->mv_table[i] = av_mallocz_array(mi_ctx->b_count, sizeof(*mi_ctx->mv_table[0]));
                 if (!mi_ctx->mv_table[i])
@@ -409,28 +409,28 @@ static void search_mv(MIContext *mi_ctx, Block *blocks, int mb_x, int mb_y, int 
     int mv[2] = {x_mb, y_mb};
 
     switch (mi_ctx->me_method) {
-        case ME_METHOD_ESA:
+        case AV_ME_METHOD_ESA:
             ff_me_search_esa(me_ctx, x_mb, y_mb, mv);
             break;
-        case ME_METHOD_TSS:
+        case AV_ME_METHOD_TSS:
             ff_me_search_tss(me_ctx, x_mb, y_mb, mv);
             break;
-        case ME_METHOD_TDLS:
+        case AV_ME_METHOD_TDLS:
             ff_me_search_tdls(me_ctx, x_mb, y_mb, mv);
             break;
-        case ME_METHOD_NTSS:
+        case AV_ME_METHOD_NTSS:
             ff_me_search_ntss(me_ctx, x_mb, y_mb, mv);
             break;
-        case ME_METHOD_FSS:
+        case AV_ME_METHOD_FSS:
             ff_me_search_fss(me_ctx, x_mb, y_mb, mv);
             break;
-        case ME_METHOD_DS:
+        case AV_ME_METHOD_DS:
             ff_me_search_ds(me_ctx, x_mb, y_mb, mv);
             break;
-        case ME_METHOD_HEXBS:
+        case AV_ME_METHOD_HEXBS:
             ff_me_search_hexbs(me_ctx, x_mb, y_mb, mv);
             break;
-        case ME_METHOD_EPZS:
+        case AV_ME_METHOD_EPZS:
 
             preds[0].nb = 0;
             preds[1].nb = 0;
@@ -493,7 +493,7 @@ static void search_mv(MIContext *mi_ctx, Block *blocks, int mb_x, int mb_y, int 
             mi_ctx->mv_table[0][mb_i][dir][1] = mv[1] - y_mb;
 
             break;
-        case ME_METHOD_UMH:
+        case AV_ME_METHOD_UMH:
 
             preds[0].nb = 0;
 
@@ -767,7 +767,7 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
 
     if (mi_ctx->mi_mode == MI_MODE_MCI) {
 
-        if (mi_ctx->me_method == ME_METHOD_EPZS) {
+        if (mi_ctx->me_method == AV_ME_METHOD_EPZS) {
             mi_ctx->mv_table[2] = memcpy(mi_ctx->mv_table[2], mi_ctx->mv_table[1], sizeof(*mi_ctx->mv_table[1]) * mi_ctx->b_count);
             mi_ctx->mv_table[1] = memcpy(mi_ctx->mv_table[1], mi_ctx->mv_table[0], sizeof(*mi_ctx->mv_table[0]) * mi_ctx->b_count);
         }
