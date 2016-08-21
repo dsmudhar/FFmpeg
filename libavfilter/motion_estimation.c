@@ -360,9 +360,6 @@ uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
 
     COST_P_MV(x_mb + me_ctx->pred_x, y_mb + me_ctx->pred_y);
 
-    if (cost_min < 256)
-        return cost_min;
-
     for (i = 0; i < preds[0].nb; i++)
         COST_P_MV(x_mb + preds[0].mvs[i][0], y_mb + preds[0].mvs[i][1]);
 
