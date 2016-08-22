@@ -706,7 +706,7 @@ static int cluster_mvs(MIContext *mi_ctx)
                         continue;
 
                     if (!mb_x || !mb_y || mb_x == mi_ctx->b_width - 1 || mb_y == mi_ctx->b_height - 1)
-                        continue; //TODO test if frame boundaries don't introduce artifacts
+                        continue;
 
                     if (block->cid != mi_ctx->int_blocks[x + y * mi_ctx->b_width].cid) {
                         if (!dx && block->cid == mi_ctx->int_blocks[x + (mb_y - dy) * mi_ctx->b_width].cid ||
@@ -907,22 +907,14 @@ static void interpolate_pixels(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
     for (plane = 0; plane < mi_ctx->nb_planes; plane++) {
         int width = avf_out->width;
         int height = avf_out->height;
-
-        if (plane == 1 || plane == 2) {
-            width = mi_ctx->chroma_width;
-            height = mi_ctx->chroma_height;
-        }
+        int chroma = plane == 1 || plane == 2;
 
         for (y = 0; y < height; y++)
             for (x = 0; x < width; x++) {
-                int i;
+                int x_mv, y_mv;
                 int weight_sum = 0;
-                int v = 0;
-                Pixel *pixel;
-                if (plane == 1 || plane == 2)
-                    pixel = &mi_ctx->pixels[(x << mi_ctx->chroma_h_shift) + (y << mi_ctx->chroma_v_shift) * avf_out->width];
-                else
-                    pixel = &mi_ctx->pixels[x + y * avf_out->width];
+                int i, val = 0;
+                Pixel *pixel = &mi_ctx->pixels[x + y * avf_out->width];
 
                 for (i = 0; i < pixel->nb; i++)
                     weight_sum += pixel->weights[i];
@@ -942,18 +934,24 @@ static void interpolate_pixels(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
                 }
 
                 for (i = 0; i < pixel->nb; i++) {
-                    int is_chroma = plane == 1 || plane == 2;
-                    int x_mv = x + (pixel->mvs[i][0] >> is_chroma);
-                    int y_mv = y + (pixel->mvs[i][1] >> is_chroma);
                     Frame *frame = &mi_ctx->frames[pixel->refs[i]];
+                    if (chroma) {
+                        x_mv = (x >> mi_ctx->chroma_h_shift) + (pixel->mvs[i][0] >> mi_ctx->chroma_h_shift);
+                        y_mv = (y >> mi_ctx->chroma_v_shift) + (pixel->mvs[i][1] >> mi_ctx->chroma_v_shift);
+                    } else {
+                        x_mv = x + pixel->mvs[i][0];
+                        y_mv = y + pixel->mvs[i][1];
+                    }
 
-                    av_assert0(x_mv >= 0 && x_mv < mi_ctx->frames[0].avf->width);
-                    av_assert0(y_mv >= 0 && y_mv < mi_ctx->frames[0].avf->height);
-
-                    v += pixel->weights[i] * frame->avf->data[plane][x_mv + y_mv * frame->avf->linesize[plane]];
+                    val += pixel->weights[i] * frame->avf->data[plane][x_mv + y_mv * frame->avf->linesize[plane]];
                 }
 
-                avf_out->data[plane][x + y * avf_out->linesize[plane]] = ROUNDED_DIV(v, weight_sum);
+                val = ROUNDED_DIV(val, weight_sum);
+
+                if (chroma)
+                    avf_out->data[plane][(x >> mi_ctx->chroma_h_shift) + (y >> mi_ctx->chroma_v_shift) * avf_out->linesize[plane]] = val;
+                else
+                    avf_out->data[plane][x + y * avf_out->linesize[plane]] = val;
             }
     }
 }
