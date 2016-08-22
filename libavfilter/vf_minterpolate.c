@@ -41,19 +41,12 @@
 #define SCD_METHOD_NONE 0
 #define SCD_METHOD_FDIFF 1
 
-//TESTS
-#define DEBUG_CLUSTERING 0
-#define CACHE_MVS 0
-#define EXPORT_MVS 1
-#define IMPORT_MVS 0
-
 #define NB_FRAMES 4
 #define NB_PIXEL_MVS 32
 #define NB_CLUSTERS 128
 
 #define ALPHA_MAX 1024
 #define CLUSTER_THRESHOLD 4
-#define ROUGHNESS 32
 #define PX_WEIGHT_MAX 255
 #define COST_PRED_SCALE 64
 
@@ -145,11 +138,11 @@ typedef struct Cluster {
 } Cluster;
 
 typedef struct Block {
-    int16_t mvs[2][2];          ///< motion vectors[dir][x,y]
-    int cid;                    ///< cluster id
-    uint64_t sbad;              ///< sum of bilateral abs diffs
-    int sb;                     ///< sub-blocks boolean
-    struct Block *subs;         ///< sub-blocks
+    int16_t mvs[2][2];
+    int cid;
+    uint64_t sbad;
+    int sb;
+    struct Block *subs;
 } Block;
 
 typedef struct Pixel {
@@ -196,9 +189,6 @@ typedef struct MIContext {
     int chroma_h_shift;
     int chroma_v_shift;
     int nb_planes;
-
-    int cls;
-    int cls_max;
 } MIContext;
 
 #define OFFSET(x) offsetof(MIContext, x)
@@ -213,11 +203,11 @@ static const AVOption minterpolate_options[] = {
         CONST("mci",    "motion compensated interpolation",     MI_MODE_MCI,            "mi_mode"),
     { "mc_mode", "motion compensation mode", OFFSET(mc_mode), AV_OPT_TYPE_INT, {.i64 = MC_MODE_OBMC}, MC_MODE_OBMC, MC_MODE_AOBMC, FLAGS, "mc_mode" },
         CONST("obmc",   "overlapped block motion compensation", MC_MODE_OBMC,           "mc_mode"),
-        CONST("aobmc",  "adaptive block motion compensation",   MC_MODE_AOBMC,          "mc_mode"),
+        CONST("aobmc",  "adaptive overlapped block motion compensation", MC_MODE_AOBMC, "mc_mode"),
     { "me_mode", "motion estimation mode", OFFSET(me_mode), AV_OPT_TYPE_INT, {.i64 = ME_MODE_BILAT}, ME_MODE_BIDIR, ME_MODE_BILAT, FLAGS, "me_mode" },
         CONST("bidir",  "bidirectional motion estimation",      ME_MODE_BIDIR,          "me_mode"),
         CONST("bilat",  "bilateral motion estimation",          ME_MODE_BILAT,          "me_mode"),
-    { "me", "motion estimation method", OFFSET(me_method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_UMH}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "me" },
+    { "me", "motion estimation method", OFFSET(me_method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_EPZS}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "me" },
         CONST("esa",    "exhaustive search",                    AV_ME_METHOD_ESA,       "me"),
         CONST("tss",    "three step search",                    AV_ME_METHOD_TSS,       "me"),
         CONST("tdls",   "two dimensional logarithmic search",   AV_ME_METHOD_TDLS,      "me"),
@@ -348,7 +338,7 @@ static int config_input(AVFilterLink *inlink)
     mi_ctx->chroma_height = AV_CEIL_RSHIFT(inlink->h, desc->log2_chroma_h);
     mi_ctx->chroma_width = AV_CEIL_RSHIFT(inlink->w, desc->log2_chroma_w);
 
-    avcodec_get_chroma_sub_sample(inlink->format, &mi_ctx->chroma_h_shift, &mi_ctx->chroma_v_shift); //TODO remove
+    avcodec_get_chroma_sub_sample(inlink->format, &mi_ctx->chroma_h_shift, &mi_ctx->chroma_v_shift);
 
     mi_ctx->nb_planes = av_pix_fmt_count_planes(inlink->format);
 
@@ -572,22 +562,11 @@ static void bilateral_me(MIContext *mi_ctx)
 
             block->mvs[0][0] = 0;
             block->mvs[0][1] = 0;
-
-        #if CACHE_MVS
-            int mv_x, mv_y;
-            int mb_i = mb_x + mb_y * mi_ctx->b_width;
-            mv_x = (mi_ctx->frames[2].blocks[mb_i].mvs[0][0] - mi_ctx->frames[1].blocks[mb_i].mvs[1][0]) / 4;
-            mv_y = (mi_ctx->frames[2].blocks[mb_i].mvs[0][1] - mi_ctx->frames[1].blocks[mb_i].mvs[1][1]) / 4;
-            block->mvs[0][0] = mv_x;
-            block->mvs[0][1] = mv_y;
-        #endif
         }
 
-#if !CACHE_MVS
     for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
         for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++)
             search_mv(mi_ctx, mi_ctx->int_blocks, mb_x, mb_y, 0);
-#endif /* CACHE_MVS */
 }
 
 static int var_size_bme(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int n)
@@ -707,7 +686,6 @@ static int cluster_mvs(MIContext *mi_ctx)
                     cluster->nb--;
 
                     c_max = FFMAX(c_max, c);
-                    mi_ctx->cls_max = c_max;
                     block->cid = c;
 
                     changed = 1;
@@ -730,7 +708,6 @@ static int cluster_mvs(MIContext *mi_ctx)
                     if (!mb_x || !mb_y || mb_x == mi_ctx->b_width - 1 || mb_y == mi_ctx->b_height - 1)
                         continue; //TODO test if frame boundaries don't introduce artifacts
 
-                    //if (mi_ctx->int_blocks[x + y * mi_ctx->b_width].cid == 0) {
                     if (block->cid != mi_ctx->int_blocks[x + y * mi_ctx->b_width].cid) {
                         if (!dx && block->cid == mi_ctx->int_blocks[x + (mb_y - dy) * mi_ctx->b_width].cid ||
                             !dy && block->cid == mi_ctx->int_blocks[(mb_x - dx) + y * mi_ctx->b_width].cid) {
@@ -767,7 +744,6 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
 
         if (mi_ctx->me_mode == ME_MODE_BIDIR) {
 
-        #if !IMPORT_MVS
             if (mi_ctx->frames[1].avf) {
                 for (dir = 0; dir < 2; dir++) {
                     mi_ctx->me_ctx.linesize = mi_ctx->frames[2].avf->linesize[0];
@@ -779,36 +755,6 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
                             search_mv(mi_ctx, mi_ctx->frames[2].blocks, mb_x, mb_y, dir);
                 }
             }
-        #else
-            AVFrameSideData *sd;
-            int i;
-            sd = av_frame_get_side_data(frame->avf, AV_FRAME_DATA_MOTION_VECTORS);
-
-            for (i = 0; i < mi_ctx->b_count; i++)
-                for (dir = 0; dir < 2; dir++) {
-                    frame->blocks[i].mvs[dir][0] = 0;
-                    frame->blocks[i].mvs[dir][1] = 0;
-                }
-
-            if (sd) {
-                AVMotionVector *mvs = (AVMotionVector *) sd->data;
-
-                for (i = 0; i < sd->size / sizeof(AVMotionVector); i++) {
-                    AVMotionVector *mv = &mvs[i];
-                    int mb_i, mb_y, mb_x;
-
-                    mb_x = av_clip((mv->dst_x) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_width - 1);
-                    mb_y = av_clip((mv->dst_y) >> mi_ctx->log2_mb_size, 0, mi_ctx->b_height - 1);
-
-                    dir = mv->source > 0;
-                    mb_i = mb_x + mi_ctx->b_width * mb_y;
-
-                    frame->blocks[mb_i].mvs[dir][0] = (mv->src_x - mv->dst_x);
-                    frame->blocks[mb_i].mvs[dir][1] = (mv->src_y - mv->dst_y);
-
-                }
-            }
-        #endif
 
         } else if (mi_ctx->me_mode == ME_MODE_BILAT) {
             Block *block;
@@ -888,41 +834,6 @@ static int detect_scene_change(MIContext *mi_ctx)
     }
 
     return 0;
-}
-
-static int get_roughness(MIContext *mi_ctx, int mb_x, int mb_y, int mv_x, int mv_y, int dir)
-{
-    int x, y;
-    int roughness = INT_MAX;
-
-    for (y = FFMAX(mb_y - 1, 0); y < FFMIN(mb_y + 2, mi_ctx->b_height); y++)
-        for (x = FFMAX(mb_x - 1, 0); x < FFMIN(mb_x + 2, mi_ctx->b_width); x++) {
-            int d, mv_x1, mv_y1;
-            int dir1 = dir;
-
-            if (dir < 0) {
-                if (x == mb_x && y == mb_y)
-                    continue;
-
-                mv_x *= 2; mv_y *= 2;
-                mv_x1 = mi_ctx->int_blocks[x + y * mi_ctx->b_width].mvs[0][0] * 2;
-                mv_y1 = mi_ctx->int_blocks[x + y * mi_ctx->b_width].mvs[0][1] * 2;
-            } else {
-                if (x == mb_x && y == mb_y)
-                    dir1 = 1 - dir;
-
-                mv_x1 = mi_ctx->frames[2 - dir].blocks[x + y * mi_ctx->b_width].mvs[dir1][0];
-                mv_y1 = mi_ctx->frames[2 - dir].blocks[x + y * mi_ctx->b_width].mvs[dir1][1];
-                if (dir != dir1) {
-                    mv_x1 = -mv_x1;
-                    mv_y1 = -mv_y1;
-                }
-            }
-            d = FFABS(mv_x - mv_x1) + FFABS(mv_y - mv_y1);
-            roughness = FFMIN(roughness, d);
-        }
-
-    return roughness;
 }
 
 #define ADD_PIXELS(b_weight, mv_x, mv_y)\
@@ -1008,12 +919,11 @@ static void interpolate_pixels(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
                 int weight_sum = 0;
                 int v = 0;
                 Pixel *pixel;
-                if (plane == 1 || plane == 2) //FIXME optimize
+                if (plane == 1 || plane == 2)
                     pixel = &mi_ctx->pixels[(x << mi_ctx->chroma_h_shift) + (y << mi_ctx->chroma_v_shift) * avf_out->width];
                 else
                     pixel = &mi_ctx->pixels[x + y * avf_out->width];
 
-                //FIXME optimize
                 for (i = 0; i < pixel->nb; i++)
                     weight_sum += pixel->weights[i];
 
@@ -1032,7 +942,7 @@ static void interpolate_pixels(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
                 }
 
                 for (i = 0; i < pixel->nb; i++) {
-                    int is_chroma = plane == 1 || plane == 2; //FIXME
+                    int is_chroma = plane == 1 || plane == 2;
                     int x_mv = x + (pixel->mvs[i][0] >> is_chroma);
                     int y_mv = y + (pixel->mvs[i][1] >> is_chroma);
                     Frame *frame = &mi_ctx->frames[pixel->refs[i]];
@@ -1203,104 +1113,9 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                 obmc(mi_ctx, alpha);
                 interpolate_pixels(mi_ctx, alpha, avf_out);
 
-            #if EXPORT_MVS
-                /* export MVs */
-                AVFrameSideData *sd;
-                AVMotionVector *mv;
-                int dir;
-                int mb_x, mb_y;
-
-                sd = av_frame_new_side_data(avf_out, AV_FRAME_DATA_MOTION_VECTORS, 2 * mi_ctx->b_count * sizeof(AVMotionVector));
-                mv = (AVMotionVector *) sd->data;
-                for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-                    for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-
-                        for (dir = 0; dir < 2; dir++) {
-                            int mv_x = mi_ctx->frames[2 - dir].blocks[mb_x + mb_y * mi_ctx->b_width].mvs[dir][0];
-                            int mv_y = mi_ctx->frames[2 - dir].blocks[mb_x + mb_y * mi_ctx->b_width].mvs[dir][1];
-                            int a = (ALPHA_MAX - alpha);
-
-                            mv->source = dir ? 1 : -1;
-                            mv->w = mi_ctx->mb_size;
-                            mv->h = mi_ctx->mb_size;
-                            mv->src_x = mi_ctx->mb_size / 2 + (mb_x << mi_ctx->log2_mb_size) + mv_x * a / ALPHA_MAX;
-                            mv->src_y = mi_ctx->mb_size / 2 + (mb_y << mi_ctx->log2_mb_size) + mv_y * a / ALPHA_MAX;
-                            mv->dst_x = mi_ctx->mb_size / 2 + (mb_x << mi_ctx->log2_mb_size);
-                            mv->dst_y = mi_ctx->mb_size / 2 + (mb_y << mi_ctx->log2_mb_size);
-                            mv++;
-                        }
-                }
-            #endif
             } else if (mi_ctx->me_mode == ME_MODE_BILAT) {
                 int mb_x, mb_y;
                 Block *block;
-
-            #if DEBUG_CLUSTERING
-                int dx, dy;
-                int c;
-                av_frame_copy(avf_out, mi_ctx->frames[2].avf);
-
-                for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-                    for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-                        int i = 0; int flag = 0;
-                        block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
-                        for (y = FFMAX(mb_y - 1, 0); y < FFMIN(mb_y + 2, mi_ctx->b_height); y++)
-                            for (x = FFMAX(mb_x - 1, 0); x < FFMIN(mb_x + 2, mi_ctx->b_width); x++) {
-                                if ((x - mb_x) && (y - mb_y))
-                                    continue;
-
-                                if (block->cid != mi_ctx->int_blocks[x + y * mi_ctx->b_width].cid) {
-                                    dx = x - mb_x;
-                                    dy = y - mb_y;
-                                    if (!dx && (block->cid == mi_ctx->int_blocks[x + (mb_y - dy) * mi_ctx->b_width].cid)) {
-                                        if ((block->cid == mi_ctx->int_blocks[x - 1 + (mb_y - dy) * mi_ctx->b_width].cid) ||
-                                            (block->cid == mi_ctx->int_blocks[x + 1 + (mb_y - dy) * mi_ctx->b_width].cid))
-                                            flag = 1;
-                                    } else if (!dy && (block->cid == mi_ctx->int_blocks[(mb_x - dx) + y * mi_ctx->b_width].cid)) {
-                                        if ((block->cid == mi_ctx->int_blocks[(mb_x - dx) + (y - 1) * mi_ctx->b_width].cid) ||
-                                            (block->cid == mi_ctx->int_blocks[(mb_x - dx) + (y - 1) * mi_ctx->b_width].cid))
-                                            flag = 1;
-                                    }
-                                    i++;
-                                }
-                            }
-
-                        if (block->cid > 0) {
-                        //if (block->cid == mi_ctx->cls) {
-                            for (y = mb_y * mi_ctx->mb_size; y < (mb_y + 1) * mi_ctx->mb_size; y++)
-                                for (x = mb_x * mi_ctx->mb_size; x < (mb_x + 1) * mi_ctx->mb_size; x++) {
-                                    if (block->sb) {
-                                        avf_out->data[0][x + y * avf_out->linesize[0]] = 255;
-                                    } else {
-                                        int ins = block->cid % 5;
-                                        //avf_out->data[0][x + y * avf_out->linesize[0]] /= (ins < 2 ? 2 : ins);
-                                        block->mvs[0][0] = 0;
-                                        block->mvs[0][1] = 0;
-                                    }
-                                }
-                            //block->mvs[0][0] = 0;
-                            //block->mvs[0][1] = 0;
-                        } else {
-                            //set MVs to 0
-                            block->mvs[0][0] = 0;
-                            block->mvs[0][1] = 0;
-                        }
-                    }
-
-                /*mi_ctx->cls++;
-                if (mi_ctx->cls >= mi_ctx->cls_max)
-                    mi_ctx->cls = 1;
-                for (c = 0; c < mi_ctx->cls_max; c++) {
-                    if (mi_ctx->clusters[mi_ctx->cls].nb < 2) {
-                        mi_ctx->cls++;
-                        if (mi_ctx->cls >= mi_ctx->cls_max) {
-                            mi_ctx->cls = 0;
-                            break;
-                        }
-                    }
-                }*/
-
-            #else
 
                 for (y = 0; y < mi_ctx->frames[0].avf->height; y++)
                     for (x = 0; x < mi_ctx->frames[0].avf->width; x++)
@@ -1318,59 +1133,6 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                     }
 
                 interpolate_pixels(mi_ctx, alpha, avf_out);
-
-            #endif
-
-            #if EXPORT_MVS
-                /* export MVs */
-                AVFrameSideData *sd;
-                AVMotionVector *mv;
-                int count = 0;
-
-                sd = av_frame_new_side_data(avf_out, AV_FRAME_DATA_MOTION_VECTORS, 4 * mi_ctx->b_count * sizeof(AVMotionVector));
-                mv = (AVMotionVector *) sd->data;
-                for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
-                    for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
-                        block = &mi_ctx->int_blocks[mb_x + mb_y * mi_ctx->b_width];
-/*
-                        if (block->sb) {
-                            int mb_size = mi_ctx->mb_size / 2;
-                            for (y = 0; y < 2; y++)
-                                for (x = 0; x < 2; x++) {
-                                    mv->source = -1;
-                                    mv->w = mb_size;
-                                    mv->h = mb_size;
-                                    mv->src_x = mb_size / 2 * (x ? 3 : 1) + (mb_x << mi_ctx->log2_mb_size) + block->subs[x + y * 2].mvs[0][0] * 2;
-                                    mv->src_y = mb_size / 2 * (y ? 3 : 1) + (mb_y << mi_ctx->log2_mb_size) + block->subs[x + y * 2].mvs[0][1] * 2;
-                                    mv->dst_x = mb_size / 2 * (x ? 3 : 1) + (mb_x << mi_ctx->log2_mb_size);
-                                    mv->dst_y = mb_size / 2 * (y ? 3 : 1) + (mb_y << mi_ctx->log2_mb_size);
-                                    mv++;
-                                    count++;
-                                }
-                        } else {*/
-                            mv->source = -1;
-                            mv->w = mi_ctx->mb_size;
-                            mv->h = mi_ctx->mb_size;
-                            mv->src_x = mi_ctx->mb_size / 2 + (mb_x << mi_ctx->log2_mb_size) + block->mvs[0][0] * 2;
-                            mv->src_y = mi_ctx->mb_size / 2 + (mb_y << mi_ctx->log2_mb_size) + block->mvs[0][1] * 2;
-                            mv->dst_x = mi_ctx->mb_size / 2 + (mb_x << mi_ctx->log2_mb_size);
-                            mv->dst_y = mi_ctx->mb_size / 2 + (mb_y << mi_ctx->log2_mb_size);
-                            mv++;
-                            count++;
-                        //}
-                }
-
-                for (; count < 4 * mi_ctx->b_count; count++) {
-                    mv->source = -1;
-                    mv->w = mi_ctx->mb_size;
-                    mv->h = mi_ctx->mb_size;
-                    mv->src_x = 0;
-                    mv->src_y = 0;
-                    mv->dst_x = 0;
-                    mv->dst_y = 0;
-                    mv++;
-                }
-            #endif
             }
 
             break;
