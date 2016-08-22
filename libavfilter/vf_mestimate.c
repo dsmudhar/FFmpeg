@@ -51,7 +51,7 @@ typedef struct MEContext {
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption mestimate_options[] = {
-    { "method", "specify motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_ESA}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "method" },
+    { "method", "motion estimation method", OFFSET(method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_ESA}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "method" },
         CONST("esa",   "exhaustive search",                  AV_ME_METHOD_ESA,      "method"),
         CONST("tss",   "three step search",                  AV_ME_METHOD_TSS,      "method"),
         CONST("tdls",  "two dimensional logarithmic search", AV_ME_METHOD_TDLS,     "method"),
@@ -61,8 +61,8 @@ static const AVOption mestimate_options[] = {
         CONST("hexbs", "hexagon-based search",               AV_ME_METHOD_HEXBS,    "method"),
         CONST("epzs",  "enhanced predictive zonal search",   AV_ME_METHOD_EPZS,     "method"),
         CONST("umh",   "uneven multi-hexagon search",        AV_ME_METHOD_UMH,      "method"),
-    { "mb_size", "specify macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 8, INT_MAX, FLAGS },
-    { "search_param", "specify search parameter", OFFSET(search_param), AV_OPT_TYPE_INT, {.i64 = 7}, 4, INT_MAX, FLAGS },
+    { "mb_size", "macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 8, INT_MAX, FLAGS },
+    { "search_param", "search parameter", OFFSET(search_param), AV_OPT_TYPE_INT, {.i64 = 7}, 4, INT_MAX, FLAGS },
     { NULL }
 };
 

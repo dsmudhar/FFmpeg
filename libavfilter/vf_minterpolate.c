@@ -206,18 +206,18 @@ typedef struct MIContext {
 #define CONST(name, help, val, unit) { name, help, 0, AV_OPT_TYPE_CONST, {.i64=val}, 0, 0, FLAGS, unit }
 
 static const AVOption minterpolate_options[] = {
-    { "fps", "specify the frame rate", OFFSET(frame_rate), AV_OPT_TYPE_VIDEO_RATE, {.str = "60"}, 0, INT_MAX, FLAGS },
-    { "mi_mode", "specify the interpolation mode", OFFSET(mi_mode), AV_OPT_TYPE_INT, {.i64 = MI_MODE_MCI}, MI_MODE_DUP, MI_MODE_MCI, FLAGS, "mi_mode" },
+    { "fps", "output's frame rate", OFFSET(frame_rate), AV_OPT_TYPE_VIDEO_RATE, {.str = "60"}, 0, INT_MAX, FLAGS },
+    { "mi_mode", "motion interpolation mode", OFFSET(mi_mode), AV_OPT_TYPE_INT, {.i64 = MI_MODE_MCI}, MI_MODE_DUP, MI_MODE_MCI, FLAGS, "mi_mode" },
         CONST("dup",    "duplicate frames",                     MI_MODE_DUP,            "mi_mode"),
         CONST("blend",  "blend frames",                         MI_MODE_BLEND,          "mi_mode"),
         CONST("mci",    "motion compensated interpolation",     MI_MODE_MCI,            "mi_mode"),
-    { "mc_mode", "specify the motion compensation mode", OFFSET(mc_mode), AV_OPT_TYPE_INT, {.i64 = MC_MODE_OBMC}, MC_MODE_OBMC, MC_MODE_AOBMC, FLAGS, "mc_mode" },
+    { "mc_mode", "motion compensation mode", OFFSET(mc_mode), AV_OPT_TYPE_INT, {.i64 = MC_MODE_OBMC}, MC_MODE_OBMC, MC_MODE_AOBMC, FLAGS, "mc_mode" },
         CONST("obmc",   "overlapped block motion compensation", MC_MODE_OBMC,           "mc_mode"),
         CONST("aobmc",  "adaptive block motion compensation",   MC_MODE_AOBMC,          "mc_mode"),
-    { "me_mode", "specify the motion estimation mode", OFFSET(me_mode), AV_OPT_TYPE_INT, {.i64 = ME_MODE_BILAT}, ME_MODE_BIDIR, ME_MODE_BILAT, FLAGS, "me_mode" },
+    { "me_mode", "motion estimation mode", OFFSET(me_mode), AV_OPT_TYPE_INT, {.i64 = ME_MODE_BILAT}, ME_MODE_BIDIR, ME_MODE_BILAT, FLAGS, "me_mode" },
         CONST("bidir",  "bidirectional motion estimation",      ME_MODE_BIDIR,          "me_mode"),
         CONST("bilat",  "bilateral motion estimation",          ME_MODE_BILAT,          "me_mode"),
-    { "me", "specify motion estimation method", OFFSET(me_method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_UMH}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "me" },
+    { "me", "motion estimation method", OFFSET(me_method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_UMH}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "me" },
         CONST("esa",    "exhaustive search",                    AV_ME_METHOD_ESA,       "me"),
         CONST("tss",    "three step search",                    AV_ME_METHOD_TSS,       "me"),
         CONST("tdls",   "two dimensional logarithmic search",   AV_ME_METHOD_TDLS,      "me"),
@@ -227,8 +227,8 @@ static const AVOption minterpolate_options[] = {
         CONST("hexbs",  "hexagon-based search",                 AV_ME_METHOD_HEXBS,     "me"),
         CONST("epzs",   "enhanced predictive zonal search",     AV_ME_METHOD_EPZS,      "me"),
         CONST("umh",    "uneven multi-hexagon search",          AV_ME_METHOD_UMH,       "me"),
-    { "mb_size", "specify the macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 4, 16, FLAGS },
-    { "search_param", "specify search parameter", OFFSET(search_param), AV_OPT_TYPE_INT, {.i64 = 32}, 4, INT_MAX, FLAGS },
+    { "mb_size", "macroblock size", OFFSET(mb_size), AV_OPT_TYPE_INT, {.i64 = 16}, 4, 16, FLAGS },
+    { "search_param", "search parameter", OFFSET(search_param), AV_OPT_TYPE_INT, {.i64 = 32}, 4, INT_MAX, FLAGS },
     { "vsbmc", "variable-size block motion compensation", OFFSET(vsbmc), AV_OPT_TYPE_INT, {.i64 = 0}, 0, 1, FLAGS },
     { "scd", "scene change detection method", OFFSET(scd_method), AV_OPT_TYPE_INT, {.i64 = SCD_METHOD_FDIFF}, SCD_METHOD_NONE, SCD_METHOD_FDIFF, FLAGS, "scene" },
         CONST("none",   "disable detection",                    SCD_METHOD_NONE,        "scene"),
@@ -624,6 +624,8 @@ static int var_size_bme(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, int
 
             me_ctx->mb_size = 1 << (n - 1);
             me_ctx->search_param = 2;
+            me_ctx->pred_x = block->mvs[0][0];
+            me_ctx->pred_y = block->mvs[0][1];
 
             cost_sb = ff_me_search_ds(&mi_ctx->me_ctx, x_mb + block->mvs[0][0], y_mb + block->mvs[0][1], mv);
             mv_x = mv[0] - x_mb;
