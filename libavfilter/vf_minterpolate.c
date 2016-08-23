@@ -852,7 +852,7 @@ static int detect_scene_change(MIContext *mi_ctx)
         pixel->nb++;\
     } while(0)
 
-static void obmc(MIContext *mi_ctx, int alpha)
+static void bidirectional_obmc(MIContext *mi_ctx, int alpha)
 {
     int x, y;
     int width = mi_ctx->frames[0].avf->width;
@@ -900,7 +900,7 @@ static void obmc(MIContext *mi_ctx, int alpha)
             }
 }
 
-static void interpolate_pixels(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
+static void set_frame_data(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
 {
     int x, y, plane;
 
@@ -993,7 +993,7 @@ static void var_size_bmc(MIContext *mi_ctx, Block *block, int x_mb, int y_mb, in
         }
 }
 
-static void obmc_bilateral(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, int alpha)
+static void bilateral_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, int alpha)
 {
     int x, y;
     int width = mi_ctx->frames[0].avf->width;
@@ -1108,8 +1108,8 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
             break;
         case MI_MODE_MCI:
             if (mi_ctx->me_mode == ME_MODE_BIDIR) {
-                obmc(mi_ctx, alpha);
-                interpolate_pixels(mi_ctx, alpha, avf_out);
+                bidirectional_obmc(mi_ctx, alpha);
+                set_frame_data(mi_ctx, alpha, avf_out);
 
             } else if (mi_ctx->me_mode == ME_MODE_BILAT) {
                 int mb_x, mb_y;
@@ -1126,11 +1126,11 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
                         if (block->sb)
                             var_size_bmc(mi_ctx, block, mb_x << mi_ctx->log2_mb_size, mb_y << mi_ctx->log2_mb_size, mi_ctx->log2_mb_size, alpha);
 
-                        obmc_bilateral(mi_ctx, block, mb_x, mb_y, alpha);
+                        bilateral_obmc(mi_ctx, block, mb_x, mb_y, alpha);
 
                     }
 
-                interpolate_pixels(mi_ctx, alpha, avf_out);
+                set_frame_data(mi_ctx, alpha, avf_out);
             }
 
             break;
