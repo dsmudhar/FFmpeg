@@ -31,7 +31,7 @@ enum AVMotionEstMethod {
     AV_ME_METHOD_FSS        = 5,
     AV_ME_METHOD_DS         = 6,
     AV_ME_METHOD_HEXBS      = 7,
-    AV_ME_METHOD_EPZS       = 8,    
+    AV_ME_METHOD_EPZS       = 8,
     AV_ME_METHOD_UMH        = 9,
 };
 

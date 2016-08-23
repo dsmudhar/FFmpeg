@@ -229,7 +229,7 @@ static const AVOption minterpolate_options[] = {
 
 AVFILTER_DEFINE_CLASS(minterpolate);
 
-static int query_formats(AVFilterContext *ctx) 
+static int query_formats(AVFilterContext *ctx)
 {
     static const enum AVPixelFormat pix_fmts[] = {
         AV_PIX_FMT_YUV410P, AV_PIX_FMT_YUV411P,
