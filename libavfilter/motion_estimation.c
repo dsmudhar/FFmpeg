@@ -117,7 +117,7 @@ uint64_t ff_me_search_tss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
         for (i = 0; i < 8; i++)
             COST_P_MV(x + sqr1[i][0] * step, y + sqr1[i][1] * step);
 
-        step = step / 2;
+        step = step >> 1;
 
     } while (step > 0);
 
@@ -149,7 +149,7 @@ uint64_t ff_me_search_tdls(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
             COST_P_MV(x + dia1[i][0] * step, y + dia1[i][1] * step);
 
         if (x == mv[0] && y == mv[1])
-            step = step / 2;
+            step = step >> 1;
 
     } while (step > 0);
 
@@ -202,7 +202,7 @@ uint64_t ff_me_search_ntss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
             first_step = 0;
         }
 
-        step = step / 2;
+        step = step >> 1;
 
     } while (step > 0);
 
@@ -234,7 +234,7 @@ uint64_t ff_me_search_fss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
             COST_P_MV(x + sqr1[i][0] * step, y + sqr1[i][1] * step);
 
         if (x == mv[0] && y == mv[1])
-            step = step / 2;
+            step = step >> 1;
 
     } while (step > 0);
 
