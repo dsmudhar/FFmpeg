@@ -160,11 +160,11 @@ typedef struct Frame {
 typedef struct MIContext {
     const AVClass *class;
     AVMotionEstContext me_ctx;
-    enum AVMotionEstMethod me_method;
     AVRational frame_rate;
     enum MIMode mi_mode;
     int mc_mode;
     int me_mode;
+    int me_method;
     int mb_size;
     int search_param;
     int vsbmc;

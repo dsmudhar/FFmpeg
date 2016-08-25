@@ -34,7 +34,7 @@
 typedef struct MEContext {
     const AVClass *class;
     AVMotionEstContext me_ctx;
-    enum AVMotionEstMethod method;      ///< motion estimation method
+    int method;                         ///< motion estimation method
 
     int mb_size;                        ///< macroblock size
     int search_param;                   ///< search parameter
