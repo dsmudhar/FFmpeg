@@ -181,8 +181,10 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *frame)
         return AVERROR(ENOMEM);
 
     sd = av_frame_new_side_data(out, AV_FRAME_DATA_MOTION_VECTORS, 2 * s->b_count * sizeof(AVMotionVector));
-    if (!sd)
+    if (!sd) {
+        av_frame_free(&out);
         return AVERROR(ENOMEM);
+    }
 
     me_ctx->data_cur = s->cur->data[0];
     me_ctx->linesize = s->cur->linesize[0];
