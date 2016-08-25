@@ -20,6 +20,14 @@
 
 #include "motion_estimation.h"
 
+static const int8_t square[8][2] = {{ 0,-1}, { 0, 1}, {-1, 0}, { 1, 0}, {-1,-1}, {-1, 1}, { 1,-1}, { 1, 1}};
+static const int8_t dia2[4][2]   = {{-1, 0}, { 0,-1}, { 1, 0}, { 0, 1}};
+static const int8_t dia[8][2]    = {{-2, 0}, {-1,-1}, { 0,-2}, { 1,-1}, { 2, 0}, { 1, 1}, { 0, 2}, {-1, 1}};
+static const int8_t hex2[6][2]   = {{-2, 0}, {-1,-2}, {-1, 2}, { 1,-2}, { 1, 2}, { 2, 0}};
+static const int8_t hex[16][2]   = {{-4,-2}, {-4,-1}, {-4, 0}, {-4, 1}, {-4, 2},
+                                    { 4,-2}, { 4,-1}, { 4, 0}, { 4, 1}, { 4, 2},
+                                    {-2, 3}, { 0, 4}, { 2, 3}, {-2,-3}, { 0,-4}, { 2,-3}};
+
 #define COST_MV(x, y)\
 do {\
     cost = me_ctx->get_cost(me_ctx, x_mb, y_mb, x, y);\
@@ -96,8 +104,6 @@ uint64_t ff_me_search_tss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
     int step = ROUNDED_DIV(me_ctx->search_param, 2);
     int i;
 
-    int square[8][2] = {{0,-1}, {0,1}, {-1,0}, {1,0}, {-1,-1}, {-1,1}, {1,-1}, {1,1}};
-
     mv[0] = x_mb;
     mv[1] = y_mb;
 
@@ -128,9 +134,6 @@ uint64_t ff_me_search_tdls(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
     uint64_t cost, cost_min;
     int step = ROUNDED_DIV(me_ctx->search_param, 2);
     int i;
-
-    int dia2[4][2] = {{-1, 0}, { 0,-1},
-                      { 1, 0}, { 0, 1}};
 
     mv[0] = x_mb;
     mv[1] = y_mb;
@@ -164,8 +167,6 @@ uint64_t ff_me_search_ntss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
     int step = ROUNDED_DIV(me_ctx->search_param, 2);
     int first_step = 1;
     int i;
-
-    int square[8][2] = {{0,-1}, {0,1}, {-1,0}, {1,0}, {-1,-1}, {-1,1}, {1,-1}, {1,1}};
 
     mv[0] = x_mb;
     mv[1] = y_mb;
@@ -219,8 +220,6 @@ uint64_t ff_me_search_fss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
     int step = 2;
     int i;
 
-    int square[8][2] = {{0,-1}, {0,1}, {-1,0}, {1,0}, {-1,-1}, {-1,1}, {1,-1}, {1,1}};
-
     mv[0] = x_mb;
     mv[1] = y_mb;
 
@@ -252,11 +251,6 @@ uint64_t ff_me_search_ds(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv
     uint64_t cost, cost_min;
     int i;
     int dir_x, dir_y;
-
-    int dia[8][2] = {{-2, 0}, {-1,-1}, { 0,-2}, { 1,-1},
-                     { 2, 0}, { 1, 1}, { 0, 2}, {-1, 1}};
-    int dia2[4][2] = {{-1, 0}, { 0,-1},
-                      { 1, 0}, { 0, 1}};
 
     if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
         return cost_min;
@@ -312,12 +306,6 @@ uint64_t ff_me_search_hexbs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int 
     uint64_t cost, cost_min;
     int i;
 
-    int hex2[6][2] = {{-2, 0}, {-1,-2}, {-1, 2},
-                      { 1,-2}, { 1, 2}, { 2, 0}};
-
-    int dia2[4][2] = {{-1, 0}, { 0,-1},
-                      { 1, 0}, { 0, 1}};
-
     if (!(cost_min = me_ctx->get_cost(me_ctx, x_mb, y_mb, x_mb, y_mb)))
         return cost_min;
 
@@ -352,9 +340,6 @@ uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
     int i;
 
     AVMotionEstPredictor *preds = me_ctx->preds;
-
-    int dia2[4][2] = {{-1, 0}, { 0,-1},
-                      { 1, 0}, { 0, 1}};
 
     cost_min = UINT64_MAX;
 
@@ -392,20 +377,13 @@ uint64_t ff_me_search_umh(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
     int y_min = FFMAX(me_ctx->y_min, y_mb - me_ctx->search_param);
     int x_max = FFMIN(x_mb + me_ctx->search_param, me_ctx->x_max);
     int y_max = FFMIN(y_mb + me_ctx->search_param, me_ctx->y_max);
-    uint64_t cost, cost_min = UINT64_MAX;
+    uint64_t cost, cost_min;
     int d, i;
     int end_x, end_y;
 
     AVMotionEstPredictor *pred = &me_ctx->preds[0];
 
-    int hex[16][2] = {{-4,-2}, {-4,-1}, {-4, 0}, {-4, 1}, {-4, 2},
-                      { 4,-2}, { 4,-1}, { 4, 0}, { 4, 1}, { 4, 2},
-                      {-2, 3}, { 0, 4}, { 2, 3},
-                      {-2,-3}, { 0,-4}, { 2,-3}};
-    int hex2[6][2] = {{-2, 0}, {-1,-2}, {-1, 2},
-                      { 1,-2}, { 1, 2}, { 2, 0}};
-    int dia2[4][2] = {{-1, 0}, { 0,-1},
-                      { 1, 0}, { 0, 1}};
+    cost_min = UINT64_MAX;
 
     COST_P_MV(x_mb + me_ctx->pred_x, y_mb + me_ctx->pred_y);
 
