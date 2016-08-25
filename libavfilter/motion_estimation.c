@@ -20,13 +20,13 @@
 
 #include "motion_estimation.h"
 
-static const int8_t square[8][2] = {{ 0,-1}, { 0, 1}, {-1, 0}, { 1, 0}, {-1,-1}, {-1, 1}, { 1,-1}, { 1, 1}};
-static const int8_t dia2[4][2]   = {{-1, 0}, { 0,-1}, { 1, 0}, { 0, 1}};
-static const int8_t dia[8][2]    = {{-2, 0}, {-1,-1}, { 0,-2}, { 1,-1}, { 2, 0}, { 1, 1}, { 0, 2}, {-1, 1}};
-static const int8_t hex2[6][2]   = {{-2, 0}, {-1,-2}, {-1, 2}, { 1,-2}, { 1, 2}, { 2, 0}};
-static const int8_t hex[16][2]   = {{-4,-2}, {-4,-1}, {-4, 0}, {-4, 1}, {-4, 2},
-                                    { 4,-2}, { 4,-1}, { 4, 0}, { 4, 1}, { 4, 2},
-                                    {-2, 3}, { 0, 4}, { 2, 3}, {-2,-3}, { 0,-4}, { 2,-3}};
+static const int8_t sqr1[8][2]  = {{ 0,-1}, { 0, 1}, {-1, 0}, { 1, 0}, {-1,-1}, {-1, 1}, { 1,-1}, { 1, 1}};
+static const int8_t dia1[4][2]  = {{-1, 0}, { 0,-1}, { 1, 0}, { 0, 1}};
+static const int8_t dia2[8][2]  = {{-2, 0}, {-1,-1}, { 0,-2}, { 1,-1}, { 2, 0}, { 1, 1}, { 0, 2}, {-1, 1}};
+static const int8_t hex2[6][2]  = {{-2, 0}, {-1,-2}, {-1, 2}, { 1,-2}, { 1, 2}, { 2, 0}};
+static const int8_t hex4[16][2] = {{-4,-2}, {-4,-1}, {-4, 0}, {-4, 1}, {-4, 2},
+                                   { 4,-2}, { 4,-1}, { 4, 0}, { 4, 1}, { 4, 2},
+                                   {-2, 3}, { 0, 4}, { 2, 3}, {-2,-3}, { 0,-4}, { 2,-3}};
 
 #define COST_MV(x, y)\
 do {\
@@ -115,7 +115,7 @@ uint64_t ff_me_search_tss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
         y = mv[1];
 
         for (i = 0; i < 8; i++)
-            COST_P_MV(x + square[i][0] * step, y + square[i][1] * step);
+            COST_P_MV(x + sqr1[i][0] * step, y + sqr1[i][1] * step);
 
         step = step / 2;
 
@@ -146,7 +146,7 @@ uint64_t ff_me_search_tdls(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
         y = mv[1];
 
         for (i = 0; i < 4; i++)
-            COST_P_MV(x + dia2[i][0] * step, y + dia2[i][1] * step);
+            COST_P_MV(x + dia1[i][0] * step, y + dia1[i][1] * step);
 
         if (x == mv[0] && y == mv[1])
             step = step / 2;
@@ -179,13 +179,13 @@ uint64_t ff_me_search_ntss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
         y = mv[1];
 
         for (i = 0; i < 8; i++)
-            COST_P_MV(x + square[i][0] * step, y + square[i][1] * step);
+            COST_P_MV(x + sqr1[i][0] * step, y + sqr1[i][1] * step);
 
         /* addition to TSS in NTSS */
         if (first_step) {
 
             for (i = 0; i < 8; i++)
-                COST_P_MV(x + square[i][0], y + square[i][1]);
+                COST_P_MV(x + sqr1[i][0], y + sqr1[i][1]);
 
             if (x == mv[0] && y == mv[1])
                 return cost_min;
@@ -195,7 +195,7 @@ uint64_t ff_me_search_ntss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
                 y = mv[1];
 
                 for (i = 0; i < 8; i++)
-                    COST_P_MV(x + square[i][0], y + square[i][1]);
+                    COST_P_MV(x + sqr1[i][0], y + sqr1[i][1]);
                 return cost_min;
             }
 
@@ -231,7 +231,7 @@ uint64_t ff_me_search_fss(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
         y = mv[1];
 
         for (i = 0; i < 8; i++)
-            COST_P_MV(x + square[i][0] * step, y + square[i][1] * step);
+            COST_P_MV(x + sqr1[i][0] * step, y + sqr1[i][1] * step);
 
         if (x == mv[0] && y == mv[1])
             step = step / 2;
@@ -264,7 +264,7 @@ uint64_t ff_me_search_ds(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv
 
     #if 1
         for (i = 0; i < 8; i++)
-            COST_P_MV(x + dia[i][0], y + dia[i][1]);
+            COST_P_MV(x + dia2[i][0], y + dia2[i][1]);
     #else
         /* this version skips previously examined 3 or 5 locations based on prev origin */
         if (dir_x <= 0)
@@ -291,7 +291,7 @@ uint64_t ff_me_search_ds(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *mv
     } while (x != mv[0] || y != mv[1]);
 
     for (i = 0; i < 4; i++)
-        COST_P_MV(x + dia2[i][0], y + dia2[i][1]);
+        COST_P_MV(x + dia1[i][0], y + dia1[i][1]);
 
     return cost_min;
 }
@@ -319,7 +319,7 @@ uint64_t ff_me_search_hexbs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int 
     } while (x != mv[0] || y != mv[1]);
 
     for (i = 0; i < 4; i++)
-        COST_P_MV(x + dia2[i][0], y + dia2[i][1]);
+        COST_P_MV(x + dia1[i][0], y + dia1[i][1]);
 
     return cost_min;
 }
@@ -356,7 +356,7 @@ uint64_t ff_me_search_epzs(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *
         y = mv[1];
 
         for (i = 0; i < 4; i++)
-            COST_P_MV(x + dia2[i][0], y + dia2[i][1]);
+            COST_P_MV(x + dia1[i][0], y + dia1[i][1]);
 
     } while (x != mv[0] || y != mv[1]);
 
@@ -413,7 +413,7 @@ uint64_t ff_me_search_umh(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
     y = mv[1];
     for (d = 1; d <= me_ctx->search_param / 4; d++)
         for (i = 1; i < 16; i++)
-            COST_P_MV(x + hex[i][0] * d, y + hex[i][1] * d);
+            COST_P_MV(x + hex4[i][0] * d, y + hex4[i][1] * d);
 
     // Extended Hexagon-based Search
     do {
@@ -426,7 +426,7 @@ uint64_t ff_me_search_umh(AVMotionEstContext *me_ctx, int x_mb, int y_mb, int *m
     } while (x != mv[0] || y != mv[1]);
 
     for (i = 0; i < 4; i++)
-        COST_P_MV(x + dia2[i][0], y + dia2[i][1]);
+        COST_P_MV(x + dia1[i][0], y + dia1[i][1]);
 
     return cost_min;
 }
