@@ -21,6 +21,8 @@
 
 #include "motion_estimation.h"
 #include "libavcodec/mathops.h"
+#include "libavcodec/avcodec.h"
+#include "libavcodec/internal.h"
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
 #include "libavutil/motion_vector.h"
@@ -34,6 +36,7 @@
 
 #define ME_MODE_BIDIR 0
 #define ME_MODE_BILAT 1
+#define ME_MODE_CODEC 2
 
 #define MC_MODE_OBMC 0
 #define MC_MODE_AOBMC 1
@@ -155,6 +158,8 @@ typedef struct Pixel {
 typedef struct Frame {
     AVFrame *avf;
     Block *blocks;
+    int16_t (*mv[2])[2];
+    int8_t *ref[2];
 } Frame;
 
 typedef struct MIContext {
@@ -187,6 +192,11 @@ typedef struct MIContext {
     int log2_chroma_w;
     int log2_chroma_h;
     int nb_planes;
+
+    int log2_mv_precission;
+    AVCodecContext *avctx_enc[2];
+    uint8_t *outbuf;
+    int outbuf_size;
 } MIContext;
 
 #define OFFSET(x) offsetof(MIContext, x)
@@ -202,7 +212,7 @@ static const AVOption minterpolate_options[] = {
     { "mc_mode", "motion compensation mode", OFFSET(mc_mode), AV_OPT_TYPE_INT, {.i64 = MC_MODE_OBMC}, MC_MODE_OBMC, MC_MODE_AOBMC, FLAGS, "mc_mode" },
         CONST("obmc",   "overlapped block motion compensation", MC_MODE_OBMC,           "mc_mode"),
         CONST("aobmc",  "adaptive overlapped block motion compensation", MC_MODE_AOBMC, "mc_mode"),
-    { "me_mode", "motion estimation mode", OFFSET(me_mode), AV_OPT_TYPE_INT, {.i64 = ME_MODE_BILAT}, ME_MODE_BIDIR, ME_MODE_BILAT, FLAGS, "me_mode" },
+    { "me_mode", "motion estimation mode", OFFSET(me_mode), AV_OPT_TYPE_INT, {.i64 = ME_MODE_BILAT}, ME_MODE_BIDIR, ME_MODE_CODEC, FLAGS, "me_mode" },
         CONST("bidir",  "bidirectional motion estimation",      ME_MODE_BIDIR,          "me_mode"),
         CONST("bilat",  "bilateral motion estimation",          ME_MODE_BILAT,          "me_mode"),
     { "me", "motion estimation method", OFFSET(me_method), AV_OPT_TYPE_INT, {.i64 = AV_ME_METHOD_EPZS}, AV_ME_METHOD_ESA, AV_ME_METHOD_UMH, FLAGS, "me" },
@@ -326,12 +336,14 @@ static uint64_t get_sad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, i
 
 static int config_input(AVFilterLink *inlink)
 {
-    MIContext *mi_ctx = inlink->dst->priv;
+    AVFilterContext *ctx = inlink->dst;
+    MIContext *mi_ctx = ctx->priv;
     AVMotionEstContext *me_ctx = &mi_ctx->me_ctx;
+    AVCodec *enc;
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(inlink->format);
     const int height = inlink->h;
     const int width  = inlink->w;
-    int i;
+    int i, ret;
 
     mi_ctx->log2_chroma_h = desc->log2_chroma_h;
     mi_ctx->log2_chroma_w = desc->log2_chroma_w;
@@ -341,8 +353,9 @@ static int config_input(AVFilterLink *inlink)
     mi_ctx->log2_mb_size = av_ceil_log2_c(mi_ctx->mb_size);
     mi_ctx->mb_size = 1 << mi_ctx->log2_mb_size;
 
-    mi_ctx->b_width  = width >> mi_ctx->log2_mb_size;
-    mi_ctx->b_height = height >> mi_ctx->log2_mb_size;
+    mi_ctx->b_width  = AV_CEIL_RSHIFT(width,  mi_ctx->log2_mb_size);
+    mi_ctx->b_height = AV_CEIL_RSHIFT(height, mi_ctx->log2_mb_size);
+
     mi_ctx->b_count = mi_ctx->b_width * mi_ctx->b_height;
 
     for (i = 0; i < NB_FRAMES; i++) {
@@ -352,7 +365,7 @@ static int config_input(AVFilterLink *inlink)
             return AVERROR(ENOMEM);
     }
 
-    if (mi_ctx->mi_mode == MI_MODE_MCI) {
+    if (mi_ctx->mi_mode == MI_MODE_MCI) { //TODO call uninit on error
         if (!(mi_ctx->pixels = av_mallocz_array(width * height, sizeof(Pixel))))
             return AVERROR(ENOMEM);
 
@@ -382,7 +395,67 @@ static int config_input(AVFilterLink *inlink)
     else if (mi_ctx->me_mode == ME_MODE_BILAT)
         me_ctx->get_cost = &get_sbad_ob;
 
+
+    /* Codec Init */
+    mi_ctx->log2_mv_precission = 0;
+    enc = avcodec_find_encoder(AV_CODEC_ID_SNOW);
+
+    if (!enc) {
+        av_log(ctx, AV_LOG_ERROR, "Snow encoder not found.\n");
+        return AVERROR(EINVAL);
+    }
+
+    for (i = 0; i < 2; i++) {
+        AVCodecContext *avctx_enc;
+        AVDictionary *opts = NULL;
+
+        if (!(mi_ctx->avctx_enc[i] = avcodec_alloc_context3(NULL))) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+
+        avctx_enc = mi_ctx->avctx_enc[i];
+        avctx_enc->width = width;
+        avctx_enc->height = height;
+        avctx_enc->time_base = (AVRational){1,25};
+        avctx_enc->gop_size = i ? 2 : INT_MAX;
+        avctx_enc->max_b_frames = 0;
+        avctx_enc->pix_fmt = inlink->format;
+        avctx_enc->flags = CODEC_FLAG_QSCALE | CODEC_FLAG_LOW_DELAY;
+        if (mi_ctx->log2_mv_precission > 1)
+            avctx_enc->flags |= CODEC_FLAG_QPEL;
+        avctx_enc->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
+        avctx_enc->global_quality = 12;
+        avctx_enc->me_method = ME_ITER;
+        // avctx_enc->dia_size = 16;
+        avctx_enc->mb_decision = FF_MB_DECISION_RD;
+        avctx_enc->scenechange_threshold = 2000000000;
+        avctx_enc->me_sub_cmp =
+        avctx_enc->me_cmp = FF_CMP_SATD;
+        avctx_enc->mb_cmp = FF_CMP_SSE;
+
+        av_dict_set(&opts, "no_bitstream", "1", 0);
+        av_dict_set(&opts, "intra_penalty", "500", 0);
+        ret = avcodec_open2(avctx_enc, enc, &opts);
+        av_dict_free(&opts);
+        if (ret < 0)
+            goto fail;
+        av_assert0(avctx_enc->codec);
+    }
+
+    mi_ctx->outbuf_size = (width + 16) * (height + 16) * 10;
+    if (!(mi_ctx->outbuf = av_malloc(mi_ctx->outbuf_size))) {
+        ret = AVERROR(ENOMEM);
+        goto fail;
+    }
+
     return 0;
+
+fail:
+
+    //TODO uninit(ctx);
+
+    return ret;
 }
 
 static int config_output(AVFilterLink *outlink)
@@ -717,6 +790,19 @@ static int cluster_mvs(MIContext *mi_ctx)
     return 0;
 }
 
+static int extract_mvs(MIContext *mi_ctx, Frame *frame, int dir)
+{
+    if (!frame->mv[dir])
+        frame->mv[dir] = av_malloc(mi_ctx->b_width * mi_ctx->b_height * sizeof(*frame->mv[0]));
+    if (!frame->ref[dir])
+        frame->ref[dir] = av_malloc(mi_ctx->b_width * mi_ctx->b_height * sizeof(*frame->ref[0]));
+    if (!frame->mv[dir] || !frame->ref[0])
+        return AVERROR(ENOMEM);
+
+    return avpriv_get_mvs(mi_ctx->avctx_enc[dir], frame->mv[dir], frame->ref[dir],
+                          mi_ctx->b_width, mi_ctx->b_height);
+}
+
 static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -739,7 +825,7 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
 
         if (mi_ctx->me_mode == ME_MODE_BIDIR) {
 
-            if (mi_ctx->frames[1].avf) {
+            if (mi_ctx->frames[1].avf)
                 for (dir = 0; dir < 2; dir++) {
                     mi_ctx->me_ctx.linesize = mi_ctx->frames[2].avf->linesize[0];
                     mi_ctx->me_ctx.data_cur = mi_ctx->frames[2].avf->data[0];
@@ -749,7 +835,6 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
                         for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++)
                             search_mv(mi_ctx, mi_ctx->frames[2].blocks, mb_x, mb_y, dir);
                 }
-            }
 
         } else if (mi_ctx->me_mode == ME_MODE_BILAT) {
             Block *block;
@@ -797,6 +882,35 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
                 if (ret = cluster_mvs(mi_ctx))
                     return ret;
             }
+        } else if (mi_ctx->me_mode == ME_MODE_CODEC) {
+            AVPacket pkt = { 0 };
+            int got_pkt_ptr;
+            int ret;
+
+            avf_in->quality = 2 * FF_QP2LAMBDA; //FIXME test/adjust
+            //FIXME init per MB qscale stuff
+
+            av_init_packet(&pkt);
+            pkt.data = mi_ctx->outbuf;
+            pkt.size = mi_ctx->outbuf_size;
+
+            avcodec_encode_video2(mi_ctx->avctx_enc[0], &pkt, avf_in, &got_pkt_ptr);
+            av_free_packet(&pkt);
+
+            if (mi_ctx->frames[NB_FRAMES - 2].avf) {
+                avcodec_encode_video2(mi_ctx->avctx_enc[1], &pkt, avf_in, &got_pkt_ptr);
+                av_assert0(pkt.flags & AV_PKT_FLAG_KEY);
+                av_free_packet(&pkt);
+                avcodec_encode_video2(mi_ctx->avctx_enc[1], &pkt, mi_ctx->frames[NB_FRAMES - 2].avf, &got_pkt_ptr);
+                av_assert0(!(pkt.flags & AV_PKT_FLAG_KEY));
+                av_free_packet(&pkt);
+
+                ret = extract_mvs(mi_ctx, &mi_ctx->frames[NB_FRAMES - 2], 1);
+                av_assert0(ret >= 0);
+            }
+
+            ret = extract_mvs(mi_ctx, &mi_ctx->frames[NB_FRAMES - 1], 0);
+            av_assert0(ret >= 0);
         }
     }
 
@@ -1050,6 +1164,58 @@ static void bilateral_obmc(MIContext *mi_ctx, Block *block, int mb_x, int mb_y, 
     }
 }
 
+static void codec_obmc(MIContext *mi_ctx, int alpha)
+{
+    int x, y;
+    int width = mi_ctx->frames[0].avf->width;
+    int height = mi_ctx->frames[0].avf->height;
+    int mb_y, mb_x, dir;
+
+    for (y = 0; y < height; y++)
+        for (x = 0; x < width; x++)
+            mi_ctx->pixels[x + y * width].nb = 0;
+
+    for (dir = 0; dir < 2; dir++)
+        for (mb_y = 0; mb_y < mi_ctx->b_height; mb_y++)
+            for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
+                int a = dir ? alpha : (ALPHA_MAX - alpha);
+                int ref  = mi_ctx->frames[2 - dir].ref[dir][mb_x + mb_y * mi_ctx->b_width];
+                int mv_x = mi_ctx->frames[2 - dir].mv[dir][mb_x + mb_y * mi_ctx->b_width][0] / 2; //FIXME disable subpel in codec
+                int mv_y = mi_ctx->frames[2 - dir].mv[dir][mb_x + mb_y * mi_ctx->b_width][1] / 2;
+                int start_x, start_y;
+                int startc_x, startc_y, endc_x, endc_y;
+
+                if (ref < 0)
+                    continue;
+
+                start_x = (mb_x << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2 + mv_x * a / ALPHA_MAX;
+                start_y = (mb_y << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2 + mv_y * a / ALPHA_MAX;
+
+                startc_x = av_clip(start_x, 0, width - 1);
+                startc_y = av_clip(start_y, 0, height - 1);
+                endc_x = av_clip(start_x + (2 << mi_ctx->log2_mb_size), 0, width - 1);
+                endc_y = av_clip(start_y + (2 << mi_ctx->log2_mb_size), 0, height - 1);
+
+                if (dir) {
+                    mv_x = -mv_x;
+                    mv_y = -mv_y;
+                }
+
+                for (y = startc_y; y < endc_y; y++) {
+                    int y_min = -y;
+                    int y_max = height - y - 1;
+                    for (x = startc_x; x < endc_x; x++) {
+                        int x_min = -x;
+                        int x_max = width - x - 1;
+                        int obmc_weight = obmc_tab_linear[4 - mi_ctx->log2_mb_size][(x - start_x) + ((y - start_y) << (mi_ctx->log2_mb_size + 1))];
+                        Pixel *pixel = &mi_ctx->pixels[x + y * width];
+
+                        ADD_PIXELS(obmc_weight, mv_x, mv_y);
+                    }
+                }
+            }
+}
+
 static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -1125,6 +1291,9 @@ static void interpolate(AVFilterLink *inlink, AVFrame *avf_out)
 
                     }
 
+                set_frame_data(mi_ctx, alpha, avf_out);
+            } else if (mi_ctx->me_mode == ME_MODE_CODEC) {
+                codec_obmc(mi_ctx, alpha);
                 set_frame_data(mi_ctx, alpha, avf_out);
             }
 
