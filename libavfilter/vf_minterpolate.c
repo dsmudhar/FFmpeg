@@ -125,7 +125,7 @@ static const uint8_t obmc_linear4[16] = {
  16, 48, 48, 16,
 };
 
-static const uint8_t * const obmc_tab_linear[4]= {
+static const uint8_t * const obmc_tab_linear[4] = {
     obmc_linear32, obmc_linear16, obmc_linear8, obmc_linear4
 };
 
@@ -159,6 +159,8 @@ typedef struct Frame {
     AVFrame *avf;
     Block *blocks;
     int16_t (*mv[2])[2];
+    uint8_t *halfpel[4][4];
+    int halfpel_linesize[4];
     int8_t *ref[2];
 } Frame;
 
@@ -397,7 +399,7 @@ static int config_input(AVFilterLink *inlink)
 
 
     /* Codec Init */
-    mi_ctx->log2_mv_precission = 0;
+    mi_ctx->log2_mv_precission = 2;
     enc = avcodec_find_encoder(AV_CODEC_ID_SNOW);
 
     if (!enc) {
@@ -790,6 +792,97 @@ static int cluster_mvs(MIContext *mi_ctx)
     return 0;
 }
 
+static int fill_halfpel(MIContext *mi_ctx, Frame *frame)
+{
+    int x, y, p;
+    int j;
+
+    for (p = 0; p < mi_ctx->nb_planes; p++) {
+        int w = frame->avf->width;
+        int h = frame->avf->height;
+        int linesize = frame->avf->linesize[p];
+        uint8_t *data = frame->avf->data[p];
+        int hlinesize;
+
+        if (p == 1 || p == 2) {
+            w = FF_CEIL_RSHIFT(w, mi_ctx->log2_chroma_w);
+            h = FF_CEIL_RSHIFT(h, mi_ctx->log2_chroma_h);
+        }
+
+        if (!frame->halfpel_linesize[p])
+            frame->halfpel_linesize[p] = FFALIGN(w + 1, 16);
+        hlinesize = frame->halfpel_linesize[p];
+
+        for (j=0; j<4; j++)
+            if (!frame->halfpel[p][j]) {
+                if (!(frame->halfpel[p][j] = av_malloc(hlinesize * (h + 1)))) {
+                    return AVERROR(ENOMEM);
+                }
+            }
+        // 1 -5 20
+        for (x = 0; x < w + 1; x++) {
+            int x1 = x < w ? x : (w - 1);
+            int a = data[x1 + 1 * linesize];
+            int b = data[x1 + 0 * linesize];
+            int c = data[x1 + 0 * linesize];
+            int d = data[x1 + 1 * linesize];
+            int e = data[x1 + 2 * linesize];
+            int f;
+            for (y = 0; y < h + 1; y++) {
+                int y1 = y + 3;
+                if (y1 >= h)
+                    y1 = 2 * h - y1 - 1;
+                f = data[y1 * linesize + x1];
+                a = (20 * (c + d) - 5 * (b + e) + (a + f) + 16) >> 5;
+                if (a & ~255)
+                    a = ~(a >> 31);
+                frame->halfpel[p][2][x + y * hlinesize] = a;
+                a = b; b = c; c = d; d = e; e = f;
+            }
+        }
+
+        for (y = 0; y < h + 1; y++) {
+            int y1 = y < h ? y : (h - 1);
+            int a = data[y1 * linesize + 1];
+            int b = data[y1 * linesize + 0];
+            int c = data[y1 * linesize + 0];
+            int d = data[y1 * linesize + 1];
+            int e = data[y1 * linesize + 2];
+            int f;
+            memcpy(frame->halfpel[p][0] + y * hlinesize, data + y1 * linesize, w);
+            for (x = 0; x < w + 1; x++) {
+                int x1 = x + 3;
+                if (x1 >= w)
+                    x1 = 2 * w - x1 - 1;
+                f = data[y1 * linesize + x1];
+                a = (20 * (c + d) - 5 * (b + e) + (a + f) + 16) >> 5;
+                if (a & ~255)
+                    a = ~(a >> 31);
+                frame->halfpel[p][1][x + y * hlinesize] = a;
+                a = b; b = c; c = d; d = e; e = f;
+            }
+            a = frame->halfpel[p][2][y * hlinesize + 1];
+            b = frame->halfpel[p][2][y * hlinesize + 0];
+            c = frame->halfpel[p][2][y * hlinesize + 0];
+            d = frame->halfpel[p][2][y * hlinesize + 1];
+            e = frame->halfpel[p][2][y * hlinesize + 2];
+            for (x = 0; x < w + 1; x++) {
+                int x1 = x + 3;
+                if (x1 >= w)
+                    x1 = 2 * w - x1 - 1;
+                f = frame->halfpel[p][2][y * hlinesize + x1];
+                a = (20 * (c + d) - 5 * (b + e) + (a + f) + 16) >> 5;
+                if (a & ~255)
+                    a = ~(a >> 31);
+                frame->halfpel[p][3][x + y * hlinesize] = a;
+                a = b; b = c; c = d; d = e; e = f;
+            }
+        }
+    }
+
+    return 0;
+}
+
 static int extract_mvs(MIContext *mi_ctx, Frame *frame, int dir)
 {
     if (!frame->mv[dir])
@@ -886,6 +979,10 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
             AVPacket pkt = { 0 };
             int got_pkt_ptr;
             int ret;
+
+            ret = fill_halfpel(mi_ctx, &mi_ctx->frames[NB_FRAMES - 1]);
+			if (ret < 0)
+				return ret;
 
             avf_in->quality = 2 * FF_QP2LAMBDA; //FIXME test/adjust
             //FIXME init per MB qscale stuff
@@ -1009,6 +1106,45 @@ static void bidirectional_obmc(MIContext *mi_ctx, int alpha)
             }
 }
 
+// this should be optimized but dont do premature optims, first find out what is best
+static int mc_sample(MIContext *mi_ctx, Pixel *pixel, int plane, int x, int y, int i)
+{
+    int ref = pixel->refs[i];
+    int is_chroma = plane == 1 || plane == 2;
+    int mv_x = pixel->mvs[i][0] << (4 - mi_ctx->log2_mv_precission - is_chroma); // 1/16pel precission
+    int mv_y = pixel->mvs[i][1] << (4 - mi_ctx->log2_mv_precission - is_chroma); // 1/16pel precission
+    av_assert0(ref >= 0 && ref < 4);
+    Frame *frame = &mi_ctx->frames[ref];
+    int linesize;
+    uint8_t *p0, *p1, *p2, *p3;
+    int mv_x_full, mv_y_full, mv_x_sub, mv_y_sub;
+
+    linesize = frame->halfpel_linesize[plane];
+
+    mv_x_full = x + (mv_x >> 4);
+    mv_y_full = y + (mv_y >> 4);
+    mv_x_sub  = mv_x & 7;
+    mv_y_sub  = mv_y & 7;
+
+    p0 = frame->halfpel[plane][0] + mv_x_full + mv_y_full * linesize;
+    p1 = frame->halfpel[plane][1] + mv_x_full + mv_y_full * linesize;
+    p2 = frame->halfpel[plane][2] + mv_x_full + mv_y_full * linesize;
+    p3 = frame->halfpel[plane][3] + mv_x_full + mv_y_full * linesize;
+
+    if (mv_x & 8) {
+        p0 += 1;
+        p2 += 1;
+        mv_x_sub = 8 - mv_x_sub;
+    }
+    if (mv_y & 8) {
+        p0 += linesize;
+        p1 += linesize;
+        mv_y_sub = 8 - mv_y_sub;
+    }
+
+    return ((8 - mv_y_sub) * ((8 - mv_x_sub) * p0[0] + (mv_x_sub) * p1[0]) + (mv_y_sub) * ((8 - mv_x_sub) * p2[0] + (mv_x_sub) * p3[0]) + 32) >> 6;
+}
+
 static void set_frame_data(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
 {
     int x, y, plane;
@@ -1016,14 +1152,22 @@ static void set_frame_data(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
     for (plane = 0; plane < mi_ctx->nb_planes; plane++) {
         int width = avf_out->width;
         int height = avf_out->height;
-        int chroma = plane == 1 || plane == 2;
+
+        if (plane == 1 || plane == 2) {
+            width = FF_CEIL_RSHIFT(width, mi_ctx->log2_chroma_w);
+            height = FF_CEIL_RSHIFT(height, mi_ctx->log2_chroma_h);
+        }
 
         for (y = 0; y < height; y++)
             for (x = 0; x < width; x++) {
-                int x_mv, y_mv;
                 int weight_sum = 0;
                 int i, val = 0;
-                Pixel *pixel = &mi_ctx->pixels[x + y * avf_out->width];
+                Pixel *pixel;
+
+                if (plane == 1 || plane == 2) //FIXME optimize
+                    pixel = &mi_ctx->pixels[(x << mi_ctx->log2_chroma_w) + (y << mi_ctx->log2_chroma_h) * avf_out->width];
+                else
+                    pixel = &mi_ctx->pixels[x + y * avf_out->width];
 
                 for (i = 0; i < pixel->nb; i++)
                     weight_sum += pixel->weights[i];
@@ -1042,25 +1186,10 @@ static void set_frame_data(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
                     weight_sum = ALPHA_MAX;
                 }
 
-                for (i = 0; i < pixel->nb; i++) {
-                    Frame *frame = &mi_ctx->frames[pixel->refs[i]];
-                    if (chroma) {
-                        x_mv = (x >> mi_ctx->log2_chroma_w) + pixel->mvs[i][0] / (1 << mi_ctx->log2_chroma_w);
-                        y_mv = (y >> mi_ctx->log2_chroma_h) + pixel->mvs[i][1] / (1 << mi_ctx->log2_chroma_h);
-                    } else {
-                        x_mv = x + pixel->mvs[i][0];
-                        y_mv = y + pixel->mvs[i][1];
-                    }
+                for (i = 0; i < pixel->nb; i++)
+                    val += pixel->weights[i] * mc_sample(mi_ctx, pixel, plane, x, y, i);
 
-                    val += pixel->weights[i] * frame->avf->data[plane][x_mv + y_mv * frame->avf->linesize[plane]];
-                }
-
-                val = ROUNDED_DIV(val, weight_sum);
-
-                if (chroma)
-                    avf_out->data[plane][(x >> mi_ctx->log2_chroma_w) + (y >> mi_ctx->log2_chroma_h) * avf_out->linesize[plane]] = val;
-                else
-                    avf_out->data[plane][x + y * avf_out->linesize[plane]] = val;
+				avf_out->data[plane][x + y * avf_out->linesize[plane]] = ROUNDED_DIV(val, weight_sum);
             }
     }
 }
@@ -1180,16 +1309,16 @@ static void codec_obmc(MIContext *mi_ctx, int alpha)
             for (mb_x = 0; mb_x < mi_ctx->b_width; mb_x++) {
                 int a = dir ? alpha : (ALPHA_MAX - alpha);
                 int ref  = mi_ctx->frames[2 - dir].ref[dir][mb_x + mb_y * mi_ctx->b_width];
-                int mv_x = mi_ctx->frames[2 - dir].mv[dir][mb_x + mb_y * mi_ctx->b_width][0] / 2; //FIXME disable subpel in codec
-                int mv_y = mi_ctx->frames[2 - dir].mv[dir][mb_x + mb_y * mi_ctx->b_width][1] / 2;
+                int mv_x = mi_ctx->frames[2 - dir].mv[dir][mb_x + mb_y * mi_ctx->b_width][0] / (mi_ctx->log2_mv_precission == 0 ? 2 : 1); //FIXME
+                int mv_y = mi_ctx->frames[2 - dir].mv[dir][mb_x + mb_y * mi_ctx->b_width][1] / (mi_ctx->log2_mv_precission == 0 ? 2 : 1);
                 int start_x, start_y;
                 int startc_x, startc_y, endc_x, endc_y;
 
                 if (ref < 0)
                     continue;
 
-                start_x = (mb_x << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2 + mv_x * a / ALPHA_MAX;
-                start_y = (mb_y << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2 + mv_y * a / ALPHA_MAX;
+                start_x = (mb_x << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2 + mv_x * a / (ALPHA_MAX << mi_ctx->log2_mv_precission);
+                start_y = (mb_y << mi_ctx->log2_mb_size) - mi_ctx->mb_size / 2 + mv_y * a / (ALPHA_MAX << mi_ctx->log2_mv_precission);
 
                 startc_x = av_clip(start_x, 0, width - 1);
                 startc_y = av_clip(start_y, 0, height - 1);
@@ -1202,11 +1331,11 @@ static void codec_obmc(MIContext *mi_ctx, int alpha)
                 }
 
                 for (y = startc_y; y < endc_y; y++) {
-                    int y_min = -y;
-                    int y_max = height - y - 1;
+                    int y_min = -y << mi_ctx->log2_mv_precission;
+                    int y_max = (height - y - 1) << mi_ctx->log2_mv_precission;
                     for (x = startc_x; x < endc_x; x++) {
-                        int x_min = -x;
-                        int x_max = width - x - 1;
+                        int x_min = -x << mi_ctx->log2_mv_precission;
+                        int x_max = (width - x - 1) << mi_ctx->log2_mv_precission;
                         int obmc_weight = obmc_tab_linear[4 - mi_ctx->log2_mb_size][(x - start_x) + ((y - start_y) << (mi_ctx->log2_mb_size + 1))];
                         Pixel *pixel = &mi_ctx->pixels[x + y * width];
 
