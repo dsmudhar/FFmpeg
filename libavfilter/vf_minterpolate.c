@@ -336,6 +336,8 @@ static uint64_t get_sad_ob(AVMotionEstContext *me_ctx, int x, int y, int x_mv, i
     return sad + (FFABS(mv_x - me_ctx->pred_x) + FFABS(mv_y - me_ctx->pred_y)) * COST_PRED_SCALE;
 }
 
+static av_cold void uninit(AVFilterContext *ctx);
+
 static int config_input(AVFilterLink *inlink)
 {
     AVFilterContext *ctx = inlink->dst;
@@ -360,43 +362,48 @@ static int config_input(AVFilterLink *inlink)
 
     mi_ctx->b_count = mi_ctx->b_width * mi_ctx->b_height;
 
-    for (i = 0; i < NB_FRAMES; i++) {
-        Frame *frame = &mi_ctx->frames[i];
-        frame->blocks = av_mallocz_array(mi_ctx->b_count, sizeof(Block));
-        if (!frame->blocks)
-            return AVERROR(ENOMEM);
-    }
-
-    if (mi_ctx->mi_mode == MI_MODE_MCI) { //TODO call uninit on error
-        if (!(mi_ctx->pixels = av_mallocz_array(width * height, sizeof(Pixel))))
-            return AVERROR(ENOMEM);
-
-        if (mi_ctx->me_mode == ME_MODE_BILAT)
-            if (!(mi_ctx->int_blocks = av_mallocz_array(mi_ctx->b_count, sizeof(Block))))
-                return AVERROR(ENOMEM);
-
-        if (mi_ctx->me_method == AV_ME_METHOD_EPZS) {
-            for (i = 0; i < 3; i++) {
-                mi_ctx->mv_table[i] = av_mallocz_array(mi_ctx->b_count, sizeof(*mi_ctx->mv_table[0]));
-                if (!mi_ctx->mv_table[i])
-                    return AVERROR(ENOMEM);
-            }
-        }
-    }
-
     if (mi_ctx->scd_method == SCD_METHOD_FDIFF) {
         mi_ctx->sad = av_pixelutils_get_sad_fn(3, 3, 2, mi_ctx);
         if (!mi_ctx->sad)
             return AVERROR(EINVAL);
     }
 
+    if (mi_ctx->mi_mode != MI_MODE_MCI)
+        return 0;
+
+    if (!(mi_ctx->pixels = av_mallocz_array(width * height, sizeof(Pixel))))
+        return AVERROR(ENOMEM);
+
+  //if (me_mode == ME_MODE_BIDIR || ME_MODE_BILAT) {
+    for (i = 0; i < NB_FRAMES; i++)
+        if (!(mi_ctx->frames[i].blocks = av_mallocz_array(mi_ctx->b_count, sizeof(Block)))) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+
     ff_me_init_context(me_ctx, mi_ctx->mb_size, mi_ctx->search_param, width, height, 0, (mi_ctx->b_width - 1) << mi_ctx->log2_mb_size, 0, (mi_ctx->b_height - 1) << mi_ctx->log2_mb_size);
 
     if (mi_ctx->me_mode == ME_MODE_BIDIR)
         me_ctx->get_cost = &get_sad_ob;
-    else if (mi_ctx->me_mode == ME_MODE_BILAT)
+
+    if (mi_ctx->me_mode == ME_MODE_BILAT) {
         me_ctx->get_cost = &get_sbad_ob;
 
+        if (!(mi_ctx->int_blocks = av_mallocz_array(mi_ctx->b_count, sizeof(Block)))) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+    }
+
+    if (mi_ctx->me_method == AV_ME_METHOD_EPZS)
+        for (i = 0; i < 3; i++) {
+            mi_ctx->mv_table[i] = av_mallocz_array(mi_ctx->b_count, sizeof(*mi_ctx->mv_table[0]));
+            if (!mi_ctx->mv_table[i]) {
+                ret = AVERROR(ENOMEM);
+                goto fail;
+            }
+        }
+  //} else:
 
     /* Codec Init */
     mi_ctx->log2_mv_precission = 2;
@@ -404,7 +411,8 @@ static int config_input(AVFilterLink *inlink)
 
     if (!enc) {
         av_log(ctx, AV_LOG_ERROR, "Snow encoder not found.\n");
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        goto fail;
     }
 
     for (i = 0; i < 2; i++) {
@@ -455,7 +463,7 @@ static int config_input(AVFilterLink *inlink)
 
 fail:
 
-    //TODO uninit(ctx);
+    uninit(ctx);
 
     return ret;
 }
@@ -1525,7 +1533,6 @@ static av_cold void uninit(AVFilterContext *ctx)
     }
     av_freep(&mi_ctx->outbuf);
     mi_ctx->outbuf_size = 0;
-
 }
 
 static const AVFilterPad minterpolate_inputs[] = {
