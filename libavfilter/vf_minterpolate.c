@@ -21,8 +21,6 @@
 
 #include "motion_estimation.h"
 #include "libavcodec/mathops.h"
-#include "libavcodec/avcodec.h"
-#include "libavcodec/internal.h"
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
 #include "libavutil/motion_vector.h"
@@ -33,6 +31,8 @@
 #include "formats.h"
 #include "internal.h"
 #include "video.h"
+
+#include "snowenc_lavf.c"
 
 #define ME_MODE_BIDIR 0
 #define ME_MODE_BILAT 1
@@ -381,7 +381,9 @@ static int config_input(AVFilterLink *inlink)
             goto fail;
         }
 
-    ff_me_init_context(me_ctx, mi_ctx->mb_size, mi_ctx->search_param, width, height, 0, (mi_ctx->b_width - 1) << mi_ctx->log2_mb_size, 0, (mi_ctx->b_height - 1) << mi_ctx->log2_mb_size);
+    ff_me_init_context(me_ctx, mi_ctx->mb_size, mi_ctx->search_param, width, height,
+                       0, (mi_ctx->b_width - 1) << mi_ctx->log2_mb_size,
+                       0, (mi_ctx->b_height - 1) << mi_ctx->log2_mb_size);
 
     if (mi_ctx->me_mode == ME_MODE_BIDIR)
         me_ctx->get_cost = &get_sad_ob;
@@ -407,7 +409,8 @@ static int config_input(AVFilterLink *inlink)
 
     /* Codec Init */
     mi_ctx->log2_mv_precission = 2;
-    enc = avcodec_find_encoder(AV_CODEC_ID_SNOW);
+    //enc = avcodec_find_encoder(AV_CODEC_ID_SNOW);
+    enc = &snow_encoder;
 
     if (!enc) {
         av_log(ctx, AV_LOG_ERROR, "Snow encoder not found.\n");
@@ -427,7 +430,7 @@ static int config_input(AVFilterLink *inlink)
         avctx_enc = mi_ctx->avctx_enc[i];
         avctx_enc->width = width;
         avctx_enc->height = height;
-        avctx_enc->time_base = (AVRational){1,25};
+        avctx_enc->time_base = (AVRational) { 1, 25 };
         avctx_enc->gop_size = i ? 2 : INT_MAX;
         avctx_enc->max_b_frames = 0;
         avctx_enc->pix_fmt = inlink->format;
@@ -822,11 +825,10 @@ static int fill_halfpel(MIContext *mi_ctx, Frame *frame)
         hlinesize = frame->halfpel_linesize[p];
 
         for (j = 0; j < 4; j++)
-            if (!frame->halfpel[p][j]) {
-                if (!(frame->halfpel[p][j] = av_malloc(hlinesize * (h + 1)))) {
+            if (!frame->halfpel[p][j])
+                if (!(frame->halfpel[p][j] = av_malloc(hlinesize * (h + 1))))
                     return AVERROR(ENOMEM);
-                }
-            }
+
         // 1 -5 20
         for (x = 0; x < w + 1; x++) {
             int x1 = x < w ? x : (w - 1);
@@ -1151,9 +1153,13 @@ static int mc_sample(MIContext *mi_ctx, Pixel *pixel, int plane, int x, int y, i
 
     return ((8 - mv_y_sub) * ((8 - mv_x_sub) * p0[0] + (mv_x_sub) * p1[0]) + (mv_y_sub) * ((8 - mv_x_sub) * p2[0] + (mv_x_sub) * p3[0]) + 32) >> 6;
 
-	/*mv_x_full = x + (pixel->mvs[i][0] >> (mi_ctx->log2_mv_precission + is_chroma));
-    mv_y_full = y + (pixel->mvs[i][1] >> (mi_ctx->log2_mv_precission + is_chroma));
-    return frame->avf->data[plane][mv_x_full + mv_y_full * frame->avf->linesize[plane]];*/
+    /*
+    int is_chroma = plane == 1 || plane == 2;
+    int mv_x_full = x + (pixel->mvs[i][0] >> (mi_ctx->log2_mv_precission + is_chroma));
+    int mv_y_full = y + (pixel->mvs[i][1] >> (mi_ctx->log2_mv_precission + is_chroma));
+    Frame *frame = &mi_ctx->frames[pixel->refs[i]];
+    return frame->avf->data[plane][mv_x_full + mv_y_full * frame->avf->linesize[plane]];
+    */
 }
 
 static void set_frame_data(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
@@ -1200,7 +1206,7 @@ static void set_frame_data(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
                 for (i = 0; i < pixel->nb; i++)
                     val += pixel->weights[i] * mc_sample(mi_ctx, pixel, plane, x, y, i);
 
-				avf_out->data[plane][x + y * avf_out->linesize[plane]] = ROUNDED_DIV(val, weight_sum);
+                avf_out->data[plane][x + y * avf_out->linesize[plane]] = ROUNDED_DIV(val, weight_sum);
             }
     }
 }
