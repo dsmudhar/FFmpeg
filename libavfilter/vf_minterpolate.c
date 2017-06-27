@@ -902,7 +902,7 @@ static int extract_mvs(MIContext *mi_ctx, Frame *frame, int dir)
     if (!frame->mv[dir] || !frame->ref[0])
         return AVERROR(ENOMEM);
 
-    return avpriv_get_mvs(mi_ctx->avctx_enc[dir], frame->mv[dir], frame->ref[dir],
+    return ff_get_mvs_snow(mi_ctx->avctx_enc[dir], frame->mv[dir], frame->ref[dir],
                           mi_ctx->b_width, mi_ctx->b_height);
 }
 
@@ -927,8 +927,8 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
             mi_ctx->mv_table[1] = memcpy(mi_ctx->mv_table[1], mi_ctx->mv_table[0], sizeof(*mi_ctx->mv_table[0]) * mi_ctx->b_count);
         }
 
-        ret = fill_halfpel(mi_ctx, &mi_ctx->frames[NB_FRAMES - 1]);
-            if (ret < 0)
+        if (mi_ctx->log2_mv_precission > 0)
+            if ((ret = fill_halfpel(mi_ctx, &mi_ctx->frames[NB_FRAMES - 1])) < 0)
                 return ret;
 
         if (mi_ctx->me_mode == ME_MODE_BIDIR) {
@@ -1118,48 +1118,48 @@ static void bidirectional_obmc(MIContext *mi_ctx, int alpha)
 // this should be optimized but dont do premature optims, first find out what is best
 static int mc_sample(MIContext *mi_ctx, Pixel *pixel, int plane, int x, int y, int i)
 {
-    int ref = pixel->refs[i];
-    int is_chroma = plane == 1 || plane == 2;
-    int mv_x = pixel->mvs[i][0] << (4 - mi_ctx->log2_mv_precission - is_chroma); // 1/16pel precission
-    int mv_y = pixel->mvs[i][1] << (4 - mi_ctx->log2_mv_precission - is_chroma); // 1/16pel precission
-    av_assert0(ref >= 0 && ref < 4);
-    Frame *frame = &mi_ctx->frames[ref];
-    int linesize;
-    uint8_t *p0, *p1, *p2, *p3;
-    int mv_x_full, mv_y_full, mv_x_sub, mv_y_sub;
+    if (mi_ctx->log2_mv_precission > 0) {
+        int ref = pixel->refs[i];
+        int is_chroma = plane == 1 || plane == 2;
+        int mv_x = pixel->mvs[i][0] << (4 - mi_ctx->log2_mv_precission - is_chroma); // 1/16pel precission
+        int mv_y = pixel->mvs[i][1] << (4 - mi_ctx->log2_mv_precission - is_chroma); // 1/16pel precission
+        av_assert0(ref >= 0 && ref < 4);
+        Frame *frame = &mi_ctx->frames[ref];
+        int linesize;
+        uint8_t *p0, *p1, *p2, *p3;
+        int mv_x_full, mv_y_full, mv_x_sub, mv_y_sub;
 
-    linesize = frame->halfpel_linesize[plane];
+        linesize = frame->halfpel_linesize[plane];
 
-    mv_x_full = x + (mv_x >> 4);
-    mv_y_full = y + (mv_y >> 4);
-    mv_x_sub  = mv_x & 7;
-    mv_y_sub  = mv_y & 7;
+        mv_x_full = x + (mv_x >> 4);
+        mv_y_full = y + (mv_y >> 4);
+        mv_x_sub  = mv_x & 7;
+        mv_y_sub  = mv_y & 7;
 
-    p0 = frame->halfpel[plane][0] + mv_x_full + mv_y_full * linesize;
-    p1 = frame->halfpel[plane][1] + mv_x_full + mv_y_full * linesize;
-    p2 = frame->halfpel[plane][2] + mv_x_full + mv_y_full * linesize;
-    p3 = frame->halfpel[plane][3] + mv_x_full + mv_y_full * linesize;
+        p0 = frame->halfpel[plane][0] + mv_x_full + mv_y_full * linesize;
+        p1 = frame->halfpel[plane][1] + mv_x_full + mv_y_full * linesize;
+        p2 = frame->halfpel[plane][2] + mv_x_full + mv_y_full * linesize;
+        p3 = frame->halfpel[plane][3] + mv_x_full + mv_y_full * linesize;
 
-    if (mv_x & 8) {
-        p0 += 1;
-        p2 += 1;
-        mv_x_sub = 8 - mv_x_sub;
+        if (mv_x & 8) {
+            p0 += 1;
+            p2 += 1;
+            mv_x_sub = 8 - mv_x_sub;
+        }
+        if (mv_y & 8) {
+            p0 += linesize;
+            p1 += linesize;
+            mv_y_sub = 8 - mv_y_sub;
+        }
+
+        return ((8 - mv_y_sub) * ((8 - mv_x_sub) * p0[0] + (mv_x_sub) * p1[0]) + (mv_y_sub) * ((8 - mv_x_sub) * p2[0] + (mv_x_sub) * p3[0]) + 32) >> 6;
+    } else {
+        int is_chroma = plane == 1 || plane == 2;
+        int mv_x_full = x + (pixel->mvs[i][0] >> is_chroma);
+        int mv_y_full = y + (pixel->mvs[i][1] >> is_chroma);
+        Frame *frame = &mi_ctx->frames[pixel->refs[i]];
+        return frame->avf->data[plane][mv_x_full + mv_y_full * frame->avf->linesize[plane]];
     }
-    if (mv_y & 8) {
-        p0 += linesize;
-        p1 += linesize;
-        mv_y_sub = 8 - mv_y_sub;
-    }
-
-    return ((8 - mv_y_sub) * ((8 - mv_x_sub) * p0[0] + (mv_x_sub) * p1[0]) + (mv_y_sub) * ((8 - mv_x_sub) * p2[0] + (mv_x_sub) * p3[0]) + 32) >> 6;
-
-    /*
-    int is_chroma = plane == 1 || plane == 2;
-    int mv_x_full = x + (pixel->mvs[i][0] >> (mi_ctx->log2_mv_precission + is_chroma));
-    int mv_y_full = y + (pixel->mvs[i][1] >> (mi_ctx->log2_mv_precission + is_chroma));
-    Frame *frame = &mi_ctx->frames[pixel->refs[i]];
-    return frame->avf->data[plane][mv_x_full + mv_y_full * frame->avf->linesize[plane]];
-    */
 }
 
 static void set_frame_data(MIContext *mi_ctx, int alpha, AVFrame *avf_out)
