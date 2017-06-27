@@ -406,8 +406,4 @@ int ff_alloc_a53_sei(const AVFrame *frame, size_t prefix_len,
  */
 int64_t ff_guess_coded_bitrate(AVCodecContext *avctx);
 
-int avpriv_get_mvs(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int width, int height);
-
-int ff_get_mvs_snow(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int w, int h);
-
 #endif /* AVCODEC_INTERNAL_H */
