@@ -120,7 +120,7 @@ typedef struct SnowContext{
     VideoDSPContext vdsp;
     H264QpelContext h264qpel;
     MpegvideoEncDSPContext mpvencdsp;
-    SnowDWTContext dwt;
+    //SnowDWTContext dwt;
     AVFrame *input_picture;              ///< new_picture with the internal linesizes
     AVFrame *current_picture;
     AVFrame *last_picture[MAX_REF_FRAMES];
@@ -177,7 +177,7 @@ typedef struct SnowContext{
     int intra_penalty;
     int motion_est;
     int iterative_dia_size;
-    int scenechange_threshold;
+    int sc_threshold;
 
     MpegEncContext m; // needed for motion estimation, should not be used for anything else, the idea is to eventually make the motion estimation independent of MpegEncContext, so this will be removed then (FIXME/XXX)
 
@@ -195,44 +195,6 @@ typedef struct SnowContext{
 extern const uint8_t * const ff_obmc_tab[4];
 extern uint8_t ff_qexp[QROOT];
 extern int ff_scale_mv_ref[MAX_REF_FRAMES][MAX_REF_FRAMES];
-
-/* C bits used by mmx/sse2/altivec */
-
-static av_always_inline void snow_interleave_line_header(int * i, int width, IDWTELEM * low, IDWTELEM * high){
-    (*i) = (width) - 2;
-
-    if (width & 1){
-        low[(*i)+1] = low[((*i)+1)>>1];
-        (*i)--;
-    }
-}
-
-static av_always_inline void snow_interleave_line_footer(int * i, IDWTELEM * low, IDWTELEM * high){
-    for (; (*i)>=0; (*i)-=2){
-        low[(*i)+1] = high[(*i)>>1];
-        low[*i] = low[(*i)>>1];
-    }
-}
-
-static av_always_inline void snow_horizontal_compose_lift_lead_out(int i, IDWTELEM * dst, IDWTELEM * src, IDWTELEM * ref, int width, int w, int lift_high, int mul, int add, int shift){
-    for(; i<w; i++){
-        dst[i] = src[i] - ((mul * (ref[i] + ref[i + 1]) + add) >> shift);
-    }
-
-    if((width^lift_high)&1){
-        dst[w] = src[w] - ((mul * 2 * ref[w] + add) >> shift);
-    }
-}
-
-static av_always_inline void snow_horizontal_compose_liftS_lead_out(int i, IDWTELEM * dst, IDWTELEM * src, IDWTELEM * ref, int width, int w){
-        for(; i<w; i++){
-            dst[i] = src[i] + ((ref[i] + ref[(i+1)]+W_BO + 4 * src[i]) >> W_BS);
-        }
-
-        if(width&1){
-            dst[w] = src[w] + ((2 * ref[w] + W_BO + 4 * src[w]) >> W_BS);
-        }
-}
 
 /* common code */
 
@@ -369,7 +331,7 @@ static av_always_inline void add_yblock(SnowContext *s, int sliced, slice_buffer
         ff_snow_pred_block(s, block[3], tmp, src_stride, src_x, src_y, b_w, b_h, rb, plane_index, w, h);
     }
     if(sliced){
-        s->dwt.inner_add_yblock(obmc, obmc_stride, block, b_w, b_h, src_x,src_y, src_stride, sb, add, dst8);
+        ff_snow_inner_add_yblock(obmc, obmc_stride, block, b_w, b_h, src_x,src_y, src_stride, sb, add, dst8);
     }else{
         for(y=0; y<b_h; y++){
             //FIXME ugly misuse of obmc_stride
@@ -599,6 +561,7 @@ static inline int get_symbol2(RangeCoder *c, uint8_t *state, int log2){
 }
 
 static inline void unpack_coeffs(SnowContext *s, SubBand *b, SubBand * parent, int orientation){
+    #if 1
     const int w= b->width;
     const int h= b->height;
     int x,y;
@@ -703,6 +666,9 @@ static inline void unpack_coeffs(SnowContext *s, SubBand *b, SubBand * parent, i
     }
 
     (xc++)->x= w+1; //end marker
+    #endif
 }
+
+int ff_get_mvs_snow(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int w, int h);
 
 #endif /* AVCODEC_SNOW_H */

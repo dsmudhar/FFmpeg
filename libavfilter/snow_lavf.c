@@ -34,6 +34,26 @@
 #include "snowdata_lavf.h"
 
 
+#define snow_slice_buffer_get_line(slice_buf, line_num)                     \
+    ((slice_buf)->line[line_num] ? (slice_buf)->line[line_num]              \
+                                 : snow_slice_buffer_load_line((slice_buf), \
+                                                             (line_num)))
+
+static IDWTELEM *snow_slice_buffer_load_line(slice_buffer *buf, int line)
+{
+    IDWTELEM *buffer;
+
+    av_assert0(buf->data_stack_top >= 0);
+    if (buf->line[line])
+        return buf->line[line];
+
+    buffer = buf->data_stack[buf->data_stack_top];
+    buf->data_stack_top--;
+    buf->line[line] = buffer;
+
+    return buffer;
+}
+
 void ff_snow_inner_add_yblock(const uint8_t *obmc, const int obmc_stride, uint8_t * * block, int b_w, int b_h,
                               int src_x, int src_y, int src_stride, slice_buffer * sb, int add, uint8_t * dst8){
     int y, x;
@@ -44,7 +64,7 @@ void ff_snow_inner_add_yblock(const uint8_t *obmc, const int obmc_stride, uint8_
         const uint8_t *obmc2= obmc1+ (obmc_stride>>1);
         const uint8_t *obmc3= obmc1+ obmc_stride*(obmc_stride>>1);
         const uint8_t *obmc4= obmc3+ (obmc_stride>>1);
-        dst = slice_buffer_get_line(sb, src_y + y);
+        dst = snow_slice_buffer_get_line(sb, src_y + y);
         for(x=0; x<b_w; x++){
             int v=   obmc1[x] * block[3][x + y*src_stride]
                     +obmc2[x] * block[2][x + y*src_stride]
@@ -440,7 +460,7 @@ av_cold int ff_snow_common_init(AVCodecContext *avctx){
     ff_me_cmp_init(&s->mecc, avctx);
     ff_hpeldsp_init(&s->hdsp, avctx->flags);
     ff_videodsp_init(&s->vdsp, 8);
-    ff_dwt_init(&s->dwt);
+    //ff_dwt_init(&s->dwt);
     ff_h264qpel_init(&s->h264qpel, 8);
 
 #define mcf(dx,dy)\

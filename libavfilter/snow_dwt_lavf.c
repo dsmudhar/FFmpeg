@@ -25,444 +25,7 @@
 #include "libavcodec/me_cmp.h"
 #include "snow_dwt_lavf.h"
 
-int ff_slice_buffer_init(slice_buffer *buf, int line_count,
-                         int max_allocated_lines, int line_width,
-                         IDWTELEM *base_buffer)
-{
-    int i;
-
-    buf->base_buffer = base_buffer;
-    buf->line_count  = line_count;
-    buf->line_width  = line_width;
-    buf->data_count  = max_allocated_lines;
-    buf->line        = av_mallocz_array(line_count, sizeof(IDWTELEM *));
-    if (!buf->line)
-        return AVERROR(ENOMEM);
-    buf->data_stack  = av_malloc_array(max_allocated_lines, sizeof(IDWTELEM *));
-    if (!buf->data_stack) {
-        av_freep(&buf->line);
-        return AVERROR(ENOMEM);
-    }
-
-    for (i = 0; i < max_allocated_lines; i++) {
-        buf->data_stack[i] = av_malloc_array(line_width, sizeof(IDWTELEM));
-        if (!buf->data_stack[i]) {
-            for (i--; i >=0; i--)
-                av_freep(&buf->data_stack[i]);
-            av_freep(&buf->data_stack);
-            av_freep(&buf->line);
-            return AVERROR(ENOMEM);
-        }
-    }
-
-    buf->data_stack_top = max_allocated_lines - 1;
-    return 0;
-}
-
-IDWTELEM *ff_slice_buffer_load_line(slice_buffer *buf, int line)
-{
-    IDWTELEM *buffer;
-
-    av_assert0(buf->data_stack_top >= 0);
-//  av_assert1(!buf->line[line]);
-    if (buf->line[line])
-        return buf->line[line];
-
-    buffer = buf->data_stack[buf->data_stack_top];
-    buf->data_stack_top--;
-    buf->line[line] = buffer;
-
-    return buffer;
-}
-
-void ff_slice_buffer_release(slice_buffer *buf, int line)
-{
-    IDWTELEM *buffer;
-
-    av_assert1(line >= 0 && line < buf->line_count);
-    av_assert1(buf->line[line]);
-
-    buffer = buf->line[line];
-    buf->data_stack_top++;
-    buf->data_stack[buf->data_stack_top] = buffer;
-    buf->line[line]                      = NULL;
-}
-
-void ff_slice_buffer_flush(slice_buffer *buf)
-{
-    int i;
-
-    if (!buf->line)
-        return;
-
-    for (i = 0; i < buf->line_count; i++)
-        if (buf->line[i])
-            ff_slice_buffer_release(buf, i);
-}
-
-void ff_slice_buffer_destroy(slice_buffer *buf)
-{
-    int i;
-    ff_slice_buffer_flush(buf);
-
-    if (buf->data_stack)
-        for (i = buf->data_count - 1; i >= 0; i--)
-            av_freep(&buf->data_stack[i]);
-    av_freep(&buf->data_stack);
-    av_freep(&buf->line);
-}
-
-static av_always_inline void lift(DWTELEM *dst, DWTELEM *src, DWTELEM *ref,
-                                  int dst_step, int src_step, int ref_step,
-                                  int width, int mul, int add, int shift,
-                                  int highpass, int inverse)
-{
-    const int mirror_left  = !highpass;
-    const int mirror_right = (width & 1) ^ highpass;
-    const int w            = (width >> 1) - 1 + (highpass & width);
-    int i;
-
-#define LIFT(src, ref, inv) ((src) + ((inv) ? -(ref) : +(ref)))
-    if (mirror_left) {
-        dst[0] = LIFT(src[0], ((mul * 2 * ref[0] + add) >> shift), inverse);
-        dst   += dst_step;
-        src   += src_step;
-    }
-
-    for (i = 0; i < w; i++)
-        dst[i * dst_step] = LIFT(src[i * src_step],
-                                 ((mul * (ref[i * ref_step] +
-                                          ref[(i + 1) * ref_step]) +
-                                   add) >> shift),
-                                 inverse);
-
-    if (mirror_right)
-        dst[w * dst_step] = LIFT(src[w * src_step],
-                                 ((mul * 2 * ref[w * ref_step] + add) >> shift),
-                                 inverse);
-}
-
-static av_always_inline void liftS(DWTELEM *dst, DWTELEM *src, DWTELEM *ref,
-                                   int dst_step, int src_step, int ref_step,
-                                   int width, int mul, int add, int shift,
-                                   int highpass, int inverse)
-{
-    const int mirror_left  = !highpass;
-    const int mirror_right = (width & 1) ^ highpass;
-    const int w            = (width >> 1) - 1 + (highpass & width);
-    int i;
-
-    av_assert1(shift == 4);
-#define LIFTS(src, ref, inv)                                            \
-    ((inv) ? (src) + (((ref) + 4 * (src)) >> shift)                     \
-           : -((-16 * (src) + (ref) + add /                             \
-                4 + 1 + (5 << 25)) / (5 * 4) - (1 << 23)))
-    if (mirror_left) {
-        dst[0] = LIFTS(src[0], mul * 2 * ref[0] + add, inverse);
-        dst   += dst_step;
-        src   += src_step;
-    }
-
-    for (i = 0; i < w; i++)
-        dst[i * dst_step] = LIFTS(src[i * src_step],
-                                  mul * (ref[i * ref_step] +
-                                         ref[(i + 1) * ref_step]) + add,
-                                  inverse);
-
-    if (mirror_right)
-        dst[w * dst_step] = LIFTS(src[w * src_step],
-                                  mul * 2 * ref[w * ref_step] + add,
-                                  inverse);
-}
-
-static void horizontal_decompose53i(DWTELEM *b, DWTELEM *temp, int width)
-{
-    const int width2 = width >> 1;
-    int x;
-    const int w2 = (width + 1) >> 1;
-
-    for (x = 0; x < width2; x++) {
-        temp[x]      = b[2 * x];
-        temp[x + w2] = b[2 * x + 1];
-    }
-    if (width & 1)
-        temp[x] = b[2 * x];
-    lift(b + w2, temp + w2, temp,   1, 1, 1, width, -1, 0, 1, 1, 0);
-    lift(b,      temp,      b + w2, 1, 1, 1, width,  1, 2, 2, 0, 0);
-}
-
-static void vertical_decompose53iH0(DWTELEM *b0, DWTELEM *b1, DWTELEM *b2,
-                                    int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++)
-        b1[i] -= (b0[i] + b2[i]) >> 1;
-}
-
-static void vertical_decompose53iL0(DWTELEM *b0, DWTELEM *b1, DWTELEM *b2,
-                                    int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++)
-        b1[i] += (b0[i] + b2[i] + 2) >> 2;
-}
-
-static void spatial_decompose53i(DWTELEM *buffer, DWTELEM *temp,
-                                 int width, int height, int stride)
-{
-    int y;
-    DWTELEM *b0 = buffer + avpriv_mirror(-2 - 1, height - 1) * stride;
-    DWTELEM *b1 = buffer + avpriv_mirror(-2,     height - 1) * stride;
-
-    for (y = -2; y < height; y += 2) {
-        DWTELEM *b2 = buffer + avpriv_mirror(y + 1, height - 1) * stride;
-        DWTELEM *b3 = buffer + avpriv_mirror(y + 2, height - 1) * stride;
-
-        if (y + 1 < (unsigned)height)
-            horizontal_decompose53i(b2, temp, width);
-        if (y + 2 < (unsigned)height)
-            horizontal_decompose53i(b3, temp, width);
-
-        if (y + 1 < (unsigned)height)
-            vertical_decompose53iH0(b1, b2, b3, width);
-        if (y + 0 < (unsigned)height)
-            vertical_decompose53iL0(b0, b1, b2, width);
-
-        b0 = b2;
-        b1 = b3;
-    }
-}
-
-static void horizontal_decompose97i(DWTELEM *b, DWTELEM *temp, int width)
-{
-    const int w2 = (width + 1) >> 1;
-
-    lift(temp + w2, b + 1, b,         1, 2, 2, width, W_AM, W_AO, W_AS, 1, 1);
-    liftS(temp,     b,     temp + w2, 1, 2, 1, width, W_BM, W_BO, W_BS, 0, 0);
-    lift(b + w2, temp + w2, temp,     1, 1, 1, width, W_CM, W_CO, W_CS, 1, 0);
-    lift(b,      temp,      b + w2,   1, 1, 1, width, W_DM, W_DO, W_DS, 0, 0);
-}
-
-static void vertical_decompose97iH0(DWTELEM *b0, DWTELEM *b1, DWTELEM *b2,
-                                    int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++)
-        b1[i] -= (W_AM * (b0[i] + b2[i]) + W_AO) >> W_AS;
-}
-
-static void vertical_decompose97iH1(DWTELEM *b0, DWTELEM *b1, DWTELEM *b2,
-                                    int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++)
-        b1[i] += (W_CM * (b0[i] + b2[i]) + W_CO) >> W_CS;
-}
-
-static void vertical_decompose97iL0(DWTELEM *b0, DWTELEM *b1, DWTELEM *b2,
-                                    int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++)
-        b1[i] = (16 * 4 * b1[i] - 4 * (b0[i] + b2[i]) + W_BO * 5 + (5 << 27)) /
-                (5 * 16) - (1 << 23);
-}
-
-static void vertical_decompose97iL1(DWTELEM *b0, DWTELEM *b1, DWTELEM *b2,
-                                    int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++)
-        b1[i] += (W_DM * (b0[i] + b2[i]) + W_DO) >> W_DS;
-}
-
-static void spatial_decompose97i(DWTELEM *buffer, DWTELEM *temp,
-                                 int width, int height, int stride)
-{
-    int y;
-    DWTELEM *b0 = buffer + avpriv_mirror(-4 - 1, height - 1) * stride;
-    DWTELEM *b1 = buffer + avpriv_mirror(-4,     height - 1) * stride;
-    DWTELEM *b2 = buffer + avpriv_mirror(-4 + 1, height - 1) * stride;
-    DWTELEM *b3 = buffer + avpriv_mirror(-4 + 2, height - 1) * stride;
-
-    for (y = -4; y < height; y += 2) {
-        DWTELEM *b4 = buffer + avpriv_mirror(y + 3, height - 1) * stride;
-        DWTELEM *b5 = buffer + avpriv_mirror(y + 4, height - 1) * stride;
-
-        if (y + 3 < (unsigned)height)
-            horizontal_decompose97i(b4, temp, width);
-        if (y + 4 < (unsigned)height)
-            horizontal_decompose97i(b5, temp, width);
-
-        if (y + 3 < (unsigned)height)
-            vertical_decompose97iH0(b3, b4, b5, width);
-        if (y + 2 < (unsigned)height)
-            vertical_decompose97iL0(b2, b3, b4, width);
-        if (y + 1 < (unsigned)height)
-            vertical_decompose97iH1(b1, b2, b3, width);
-        if (y + 0 < (unsigned)height)
-            vertical_decompose97iL1(b0, b1, b2, width);
-
-        b0 = b2;
-        b1 = b3;
-        b2 = b4;
-        b3 = b5;
-    }
-}
-
-void ff_spatial_dwt(DWTELEM *buffer, DWTELEM *temp, int width, int height,
-                    int stride, int type, int decomposition_count)
-{
-    int level;
-
-    for (level = 0; level < decomposition_count; level++) {
-        switch (type) {
-        case DWT_97:
-            spatial_decompose97i(buffer, temp,
-                                 width >> level, height >> level,
-                                 stride << level);
-            break;
-        case DWT_53:
-            spatial_decompose53i(buffer, temp,
-                                 width >> level, height >> level,
-                                 stride << level);
-            break;
-        }
-    }
-}
-
-static void horizontal_compose53i(IDWTELEM *b, IDWTELEM *temp, int width)
-{
-    const int width2 = width >> 1;
-    const int w2     = (width + 1) >> 1;
-    int x;
-
-    for (x = 0; x < width2; x++) {
-        temp[2 * x]     = b[x];
-        temp[2 * x + 1] = b[x + w2];
-    }
-    if (width & 1)
-        temp[2 * x] = b[x];
-
-    b[0] = temp[0] - ((temp[1] + 1) >> 1);
-    for (x = 2; x < width - 1; x += 2) {
-        b[x]     = temp[x]     - ((temp[x - 1] + temp[x + 1] + 2) >> 2);
-        b[x - 1] = temp[x - 1] + ((b[x - 2]    + b[x]        + 1) >> 1);
-    }
-    if (width & 1) {
-        b[x]     = temp[x]     - ((temp[x - 1]     + 1) >> 1);
-        b[x - 1] = temp[x - 1] + ((b[x - 2] + b[x] + 1) >> 1);
-    } else
-        b[x - 1] = temp[x - 1] + b[x - 2];
-}
-
-static void vertical_compose53iH0(IDWTELEM *b0, IDWTELEM *b1, IDWTELEM *b2,
-                                  int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++)
-        b1[i] += (b0[i] + b2[i]) >> 1;
-}
-
-static void vertical_compose53iL0(IDWTELEM *b0, IDWTELEM *b1, IDWTELEM *b2,
-                                  int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++)
-        b1[i] -= (b0[i] + b2[i] + 2) >> 2;
-}
-
-static void spatial_compose53i_buffered_init(DWTCompose *cs, slice_buffer *sb,
-                                             int height, int stride_line)
-{
-    cs->b0 = slice_buffer_get_line(sb,
-                                   avpriv_mirror(-1 - 1, height - 1) * stride_line);
-    cs->b1 = slice_buffer_get_line(sb, avpriv_mirror(-1, height - 1) * stride_line);
-    cs->y  = -1;
-}
-
-static void spatial_compose53i_init(DWTCompose *cs, IDWTELEM *buffer,
-                                    int height, int stride)
-{
-    cs->b0 = buffer + avpriv_mirror(-1 - 1, height - 1) * stride;
-    cs->b1 = buffer + avpriv_mirror(-1,     height - 1) * stride;
-    cs->y  = -1;
-}
-
-static void spatial_compose53i_dy_buffered(DWTCompose *cs, slice_buffer *sb,
-                                           IDWTELEM *temp,
-                                           int width, int height,
-                                           int stride_line)
-{
-    int y = cs->y;
-
-    IDWTELEM *b0 = cs->b0;
-    IDWTELEM *b1 = cs->b1;
-    IDWTELEM *b2 = slice_buffer_get_line(sb,
-                                         avpriv_mirror(y + 1, height - 1) *
-                                         stride_line);
-    IDWTELEM *b3 = slice_buffer_get_line(sb,
-                                         avpriv_mirror(y + 2, height - 1) *
-                                         stride_line);
-
-    if (y + 1 < (unsigned)height && y < (unsigned)height) {
-        int x;
-
-        for (x = 0; x < width; x++) {
-            b2[x] -= (b1[x] + b3[x] + 2) >> 2;
-            b1[x] += (b0[x] + b2[x])     >> 1;
-        }
-    } else {
-        if (y + 1 < (unsigned)height)
-            vertical_compose53iL0(b1, b2, b3, width);
-        if (y + 0 < (unsigned)height)
-            vertical_compose53iH0(b0, b1, b2, width);
-    }
-
-    if (y - 1 < (unsigned)height)
-        horizontal_compose53i(b0, temp, width);
-    if (y + 0 < (unsigned)height)
-        horizontal_compose53i(b1, temp, width);
-
-    cs->b0  = b2;
-    cs->b1  = b3;
-    cs->y  += 2;
-}
-
-static void spatial_compose53i_dy(DWTCompose *cs, IDWTELEM *buffer,
-                                  IDWTELEM *temp, int width, int height,
-                                  int stride)
-{
-    int y        = cs->y;
-    IDWTELEM *b0 = cs->b0;
-    IDWTELEM *b1 = cs->b1;
-    IDWTELEM *b2 = buffer + avpriv_mirror(y + 1, height - 1) * stride;
-    IDWTELEM *b3 = buffer + avpriv_mirror(y + 2, height - 1) * stride;
-
-    if (y + 1 < (unsigned)height)
-        vertical_compose53iL0(b1, b2, b3, width);
-    if (y + 0 < (unsigned)height)
-        vertical_compose53iH0(b0, b1, b2, width);
-
-    if (y - 1 < (unsigned)height)
-        horizontal_compose53i(b0, temp, width);
-    if (y + 0 < (unsigned)height)
-        horizontal_compose53i(b1, temp, width);
-
-    cs->b0  = b2;
-    cs->b1  = b3;
-    cs->y  += 2;
-}
-
-void ff_snow_horizontal_compose97i(IDWTELEM *b, IDWTELEM *temp, int width)
+static void snow_horizontal_compose97i(IDWTELEM *b, IDWTELEM *temp, int width)
 {
     const int w2 = (width + 1) >> 1;
     int x;
@@ -526,30 +89,6 @@ static void vertical_compose97iL1(IDWTELEM *b0, IDWTELEM *b1, IDWTELEM *b2,
         b1[i] -= (W_DM * (b0[i] + b2[i]) + W_DO) >> W_DS;
 }
 
-void ff_snow_vertical_compose97i(IDWTELEM *b0, IDWTELEM *b1, IDWTELEM *b2,
-                                 IDWTELEM *b3, IDWTELEM *b4, IDWTELEM *b5,
-                                 int width)
-{
-    int i;
-
-    for (i = 0; i < width; i++) {
-        b4[i] -= (W_DM * (b3[i] + b5[i]) + W_DO) >> W_DS;
-        b3[i] -= (W_CM * (b2[i] + b4[i]) + W_CO) >> W_CS;
-        b2[i] += (W_BM * (b1[i] + b3[i]) + 4 * b2[i] + W_BO) >> W_BS;
-        b1[i] += (W_AM * (b0[i] + b2[i]) + W_AO) >> W_AS;
-    }
-}
-
-static void spatial_compose97i_buffered_init(DWTCompose *cs, slice_buffer *sb,
-                                             int height, int stride_line)
-{
-    cs->b0 = slice_buffer_get_line(sb, avpriv_mirror(-3 - 1, height - 1) * stride_line);
-    cs->b1 = slice_buffer_get_line(sb, avpriv_mirror(-3,     height - 1) * stride_line);
-    cs->b2 = slice_buffer_get_line(sb, avpriv_mirror(-3 + 1, height - 1) * stride_line);
-    cs->b3 = slice_buffer_get_line(sb, avpriv_mirror(-3 + 2, height - 1) * stride_line);
-    cs->y  = -3;
-}
-
 static void spatial_compose97i_init(DWTCompose *cs, IDWTELEM *buffer, int height,
                                     int stride)
 {
@@ -558,49 +97,6 @@ static void spatial_compose97i_init(DWTCompose *cs, IDWTELEM *buffer, int height
     cs->b2 = buffer + avpriv_mirror(-3 + 1, height - 1) * stride;
     cs->b3 = buffer + avpriv_mirror(-3 + 2, height - 1) * stride;
     cs->y  = -3;
-}
-
-static void spatial_compose97i_dy_buffered(SnowDWTContext *dsp, DWTCompose *cs,
-                                           slice_buffer * sb, IDWTELEM *temp,
-                                           int width, int height,
-                                           int stride_line)
-{
-    int y = cs->y;
-
-    IDWTELEM *b0 = cs->b0;
-    IDWTELEM *b1 = cs->b1;
-    IDWTELEM *b2 = cs->b2;
-    IDWTELEM *b3 = cs->b3;
-    IDWTELEM *b4 = slice_buffer_get_line(sb,
-                                         avpriv_mirror(y + 3, height - 1) *
-                                         stride_line);
-    IDWTELEM *b5 = slice_buffer_get_line(sb,
-                                         avpriv_mirror(y + 4, height - 1) *
-                                         stride_line);
-
-    if (y > 0 && y + 4 < height) {
-        dsp->vertical_compose97i(b0, b1, b2, b3, b4, b5, width);
-    } else {
-        if (y + 3 < (unsigned)height)
-            vertical_compose97iL1(b3, b4, b5, width);
-        if (y + 2 < (unsigned)height)
-            vertical_compose97iH1(b2, b3, b4, width);
-        if (y + 1 < (unsigned)height)
-            vertical_compose97iL0(b1, b2, b3, width);
-        if (y + 0 < (unsigned)height)
-            vertical_compose97iH0(b0, b1, b2, width);
-    }
-
-    if (y - 1 < (unsigned)height)
-        dsp->horizontal_compose97i(b0, temp, width);
-    if (y + 0 < (unsigned)height)
-        dsp->horizontal_compose97i(b1, temp, width);
-
-    cs->b0  = b2;
-    cs->b1  = b3;
-    cs->b2  = b4;
-    cs->b3  = b5;
-    cs->y  += 2;
 }
 
 static void spatial_compose97i_dy(DWTCompose *cs, IDWTELEM *buffer,
@@ -625,63 +121,15 @@ static void spatial_compose97i_dy(DWTCompose *cs, IDWTELEM *buffer,
         vertical_compose97iH0(b0, b1, b2, width);
 
     if (y - 1 < (unsigned)height)
-        ff_snow_horizontal_compose97i(b0, temp, width);
+        snow_horizontal_compose97i(b0, temp, width);
     if (y + 0 < (unsigned)height)
-        ff_snow_horizontal_compose97i(b1, temp, width);
+        snow_horizontal_compose97i(b1, temp, width);
 
     cs->b0  = b2;
     cs->b1  = b3;
     cs->b2  = b4;
     cs->b3  = b5;
     cs->y  += 2;
-}
-
-void ff_spatial_idwt_buffered_init(DWTCompose *cs, slice_buffer *sb, int width,
-                                   int height, int stride_line, int type,
-                                   int decomposition_count)
-{
-    int level;
-    for (level = decomposition_count - 1; level >= 0; level--) {
-        switch (type) {
-        case DWT_97:
-            spatial_compose97i_buffered_init(cs + level, sb, height >> level,
-                                             stride_line << level);
-            break;
-        case DWT_53:
-            spatial_compose53i_buffered_init(cs + level, sb, height >> level,
-                                             stride_line << level);
-            break;
-        }
-    }
-}
-
-void ff_spatial_idwt_buffered_slice(SnowDWTContext *dsp, DWTCompose *cs,
-                                    slice_buffer *slice_buf, IDWTELEM *temp,
-                                    int width, int height, int stride_line,
-                                    int type, int decomposition_count, int y)
-{
-    const int support = type == 1 ? 3 : 5;
-    int level;
-    if (type == 2)
-        return;
-
-    for (level = decomposition_count - 1; level >= 0; level--)
-        while (cs[level].y <= FFMIN((y >> level) + support, height >> level)) {
-            switch (type) {
-            case DWT_97:
-                spatial_compose97i_dy_buffered(dsp, cs + level, slice_buf, temp,
-                                               width >> level,
-                                               height >> level,
-                                               stride_line << level);
-                break;
-            case DWT_53:
-                spatial_compose53i_dy_buffered(cs + level, slice_buf, temp,
-                                               width >> level,
-                                               height >> level,
-                                               stride_line << level);
-                break;
-            }
-        }
 }
 
 static void spatial_idwt_init(DWTCompose *cs, IDWTELEM *buffer, int width,
@@ -693,10 +141,6 @@ static void spatial_idwt_init(DWTCompose *cs, IDWTELEM *buffer, int width,
         switch (type) {
         case DWT_97:
             spatial_compose97i_init(cs + level, buffer, height >> level,
-                                    stride << level);
-            break;
-        case DWT_53:
-            spatial_compose53i_init(cs + level, buffer, height >> level,
                                     stride << level);
             break;
         }
@@ -718,10 +162,6 @@ static void spatial_idwt_slice(DWTCompose *cs, IDWTELEM *buffer,
             switch (type) {
             case DWT_97:
                 spatial_compose97i_dy(cs + level, buffer, temp, width >> level,
-                                      height >> level, stride << level);
-                break;
-            case DWT_53:
-                spatial_compose53i_dy(cs + level, buffer, temp, width >> level,
                                       height >> level, stride << level);
                 break;
             }
@@ -787,7 +227,7 @@ static inline int w_c(struct MpegEncContext *v, uint8_t *pix1, uint8_t *pix2, pt
         pix2 += line_size;
     }
 
-    ff_spatial_dwt(tmp, tmp2, w, h, 32, type, dec_count);
+    //ff_spatial_dwt(tmp, tmp2, w, h, 32, type, dec_count);
 
     s = 0;
     av_assert1(w == h);
@@ -809,52 +249,7 @@ static inline int w_c(struct MpegEncContext *v, uint8_t *pix1, uint8_t *pix2, pt
     return s >> 9;
 }
 
-static int w53_8_c(struct MpegEncContext *v, uint8_t *pix1, uint8_t *pix2, ptrdiff_t line_size, int h)
-{
-    return w_c(v, pix1, pix2, line_size, 8, h, 1);
-}
-
-static int w97_8_c(struct MpegEncContext *v, uint8_t *pix1, uint8_t *pix2, ptrdiff_t line_size, int h)
-{
-    return w_c(v, pix1, pix2, line_size, 8, h, 0);
-}
-
-static int w53_16_c(struct MpegEncContext *v, uint8_t *pix1, uint8_t *pix2, ptrdiff_t line_size, int h)
-{
-    return w_c(v, pix1, pix2, line_size, 16, h, 1);
-}
-
-static int w97_16_c(struct MpegEncContext *v, uint8_t *pix1, uint8_t *pix2, ptrdiff_t line_size, int h)
-{
-    return w_c(v, pix1, pix2, line_size, 16, h, 0);
-}
-
-int ff_w53_32_c(struct MpegEncContext *v, uint8_t *pix1, uint8_t *pix2, ptrdiff_t line_size, int h)
-{
-    return w_c(v, pix1, pix2, line_size, 32, h, 1);
-}
-
 int ff_w97_32_c(struct MpegEncContext *v, uint8_t *pix1, uint8_t *pix2, ptrdiff_t line_size, int h)
 {
     return w_c(v, pix1, pix2, line_size, 32, h, 0);
 }
-
-av_cold void ff_dsputil_init_dwt(MECmpContext *c)
-{
-    c->w53[0] = w53_16_c;
-    c->w53[1] = w53_8_c;
-    c->w97[0] = w97_16_c;
-    c->w97[1] = w97_8_c;
-}
-
-av_cold void ff_dwt_init(SnowDWTContext *c)
-{
-    c->vertical_compose97i   = ff_snow_vertical_compose97i;
-    c->horizontal_compose97i = ff_snow_horizontal_compose97i;
-    c->inner_add_yblock      = ff_snow_inner_add_yblock;
-
-    //if (HAVE_MMX)
-    //    ff_dwt_init_x86(c);
-}
-
-

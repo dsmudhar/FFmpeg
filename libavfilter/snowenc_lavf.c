@@ -18,6 +18,12 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#define DSM_ONLY_MEMC
+#define DSM_PSNR_FLAG
+#define DSM_ENCODER_SIDEDATA
+#define DSM_NO_PASS2
+#define DSM_NO_BITSTREAM
+
 #include "libavutil/intmath.h"
 #include "libavutil/libm.h"
 #include "libavutil/log.h"
@@ -259,7 +265,7 @@ static int encode_q_branch(SnowContext *s, int level, int x, int y){
     int16_t last_mv[3][2];
     int qpel= !!(s->avctx->flags & AV_CODEC_FLAG_QPEL); //unused
     const int shift= 1+qpel;
-    MotionEstContext *c= &s->m.me;
+    MotionEstContext *mest_ctx= &s->m.me;
     int ref_context= av_log2(2*left->ref) + av_log2(2*top->ref);
     int mx_context= av_log2(2*FFABS(left->mx - top->mx));
     int my_context= av_log2(2*FFABS(left->my - top->my));
@@ -291,56 +297,56 @@ static int encode_q_branch(SnowContext *s, int level, int x, int y){
     s->m.mb_stride=2;
     s->m.mb_x=
     s->m.mb_y= 0;
-    c->skip= 0;
+    mest_ctx->skip= 0;
 
-    av_assert1(c->  stride ==   stride);
-    av_assert1(c->uvstride == uvstride);
+    av_assert1(mest_ctx->  stride ==   stride);
+    av_assert1(mest_ctx->uvstride == uvstride);
 
-    c->penalty_factor    = get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_cmp);
-    c->sub_penalty_factor= get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_sub_cmp);
-    c->mb_penalty_factor = get_penalty_factor(s->lambda, s->lambda2, c->avctx->mb_cmp);
-    c->current_mv_penalty= c->mv_penalty[s->m.f_code=1] + MAX_DMV;
+    mest_ctx->penalty_factor    = get_penalty_factor(s->lambda, s->lambda2, mest_ctx->avctx->me_cmp);
+    mest_ctx->sub_penalty_factor= get_penalty_factor(s->lambda, s->lambda2, mest_ctx->avctx->me_sub_cmp);
+    mest_ctx->mb_penalty_factor = get_penalty_factor(s->lambda, s->lambda2, mest_ctx->avctx->mb_cmp);
+    mest_ctx->current_mv_penalty= mest_ctx->mv_penalty[s->m.f_code=1] + MAX_DMV;
 
-    c->xmin = - x*block_w - 16+3;
-    c->ymin = - y*block_w - 16+3;
-    c->xmax = - (x+1)*block_w + (w<<(LOG2_MB_SIZE - s->block_max_depth)) + 16-3;
-    c->ymax = - (y+1)*block_w + (h<<(LOG2_MB_SIZE - s->block_max_depth)) + 16-3;
+    mest_ctx->xmin = - x*block_w - 16+3;
+    mest_ctx->ymin = - y*block_w - 16+3;
+    mest_ctx->xmax = - (x+1)*block_w + (w<<(LOG2_MB_SIZE - s->block_max_depth)) + 16-3;
+    mest_ctx->ymax = - (y+1)*block_w + (h<<(LOG2_MB_SIZE - s->block_max_depth)) + 16-3;
 
-    if(P_LEFT[0]     > (c->xmax<<shift)) P_LEFT[0]    = (c->xmax<<shift);
-    if(P_LEFT[1]     > (c->ymax<<shift)) P_LEFT[1]    = (c->ymax<<shift);
-    if(P_TOP[0]      > (c->xmax<<shift)) P_TOP[0]     = (c->xmax<<shift);
-    if(P_TOP[1]      > (c->ymax<<shift)) P_TOP[1]     = (c->ymax<<shift);
-    if(P_TOPRIGHT[0] < (c->xmin<<shift)) P_TOPRIGHT[0]= (c->xmin<<shift);
-    if(P_TOPRIGHT[0] > (c->xmax<<shift)) P_TOPRIGHT[0]= (c->xmax<<shift); //due to pmx no clip
-    if(P_TOPRIGHT[1] > (c->ymax<<shift)) P_TOPRIGHT[1]= (c->ymax<<shift);
+    if(P_LEFT[0]     > (mest_ctx->xmax<<shift)) P_LEFT[0]    = (mest_ctx->xmax<<shift);
+    if(P_LEFT[1]     > (mest_ctx->ymax<<shift)) P_LEFT[1]    = (mest_ctx->ymax<<shift);
+    if(P_TOP[0]      > (mest_ctx->xmax<<shift)) P_TOP[0]     = (mest_ctx->xmax<<shift);
+    if(P_TOP[1]      > (mest_ctx->ymax<<shift)) P_TOP[1]     = (mest_ctx->ymax<<shift);
+    if(P_TOPRIGHT[0] < (mest_ctx->xmin<<shift)) P_TOPRIGHT[0]= (mest_ctx->xmin<<shift);
+    if(P_TOPRIGHT[0] > (mest_ctx->xmax<<shift)) P_TOPRIGHT[0]= (mest_ctx->xmax<<shift); //due to pmx no clip
+    if(P_TOPRIGHT[1] > (mest_ctx->ymax<<shift)) P_TOPRIGHT[1]= (mest_ctx->ymax<<shift);
 
     P_MEDIAN[0]= mid_pred(P_LEFT[0], P_TOP[0], P_TOPRIGHT[0]);
     P_MEDIAN[1]= mid_pred(P_LEFT[1], P_TOP[1], P_TOPRIGHT[1]);
 
     if (!y) {
-        c->pred_x= P_LEFT[0];
-        c->pred_y= P_LEFT[1];
+        mest_ctx->pred_x= P_LEFT[0];
+        mest_ctx->pred_y= P_LEFT[1];
     } else {
-        c->pred_x = P_MEDIAN[0];
-        c->pred_y = P_MEDIAN[1];
+        mest_ctx->pred_x = P_MEDIAN[0];
+        mest_ctx->pred_y = P_MEDIAN[1];
     }
 
     score= INT_MAX;
     best_ref= 0;
     for(ref=0; ref<s->ref_frames; ref++){
-        init_ref(c, current_data, s->last_picture[ref]->data, NULL, block_w*x, block_w*y, 0);
+        init_ref(mest_ctx, current_data, s->last_picture[ref]->data, NULL, block_w*x, block_w*y, 0);
 
         ref_score= ff_epzs_motion_search(&s->m, &ref_mx, &ref_my, P, 0, /*ref_index*/ 0, last_mv,
                                          (1<<16)>>shift, level-LOG2_MB_SIZE+4, block_w);
 
-        av_assert2(ref_mx >= c->xmin);
-        av_assert2(ref_mx <= c->xmax);
-        av_assert2(ref_my >= c->ymin);
-        av_assert2(ref_my <= c->ymax);
+        av_assert2(ref_mx >= mest_ctx->xmin);
+        av_assert2(ref_mx <= mest_ctx->xmax);
+        av_assert2(ref_my >= mest_ctx->ymin);
+        av_assert2(ref_my <= mest_ctx->ymax);
 
-        ref_score= c->sub_motion_search(&s->m, &ref_mx, &ref_my, ref_score, 0, 0, level-LOG2_MB_SIZE+4, block_w);
+        ref_score= mest_ctx->sub_motion_search(&s->m, &ref_mx, &ref_my, ref_score, 0, 0, level-LOG2_MB_SIZE+4, block_w);
         ref_score= ff_get_mb_score(&s->m, ref_mx, ref_my, 0, 0, level-LOG2_MB_SIZE+4, block_w, 0);
-        ref_score+= 2*av_log2(2*ref)*c->penalty_factor;
+        ref_score+= 2*av_log2(2*ref)*mest_ctx->penalty_factor;
         if(s->ref_mvs[ref]){
             s->ref_mvs[ref][index][0]= ref_mx;
             s->ref_mvs[ref][index][1]= ref_my;
@@ -413,9 +419,9 @@ static int encode_q_branch(SnowContext *s, int level, int x, int y){
         int varc= iscore >> 8;
         int vard= score >> 8;
         if (vard <= 64 || vard < varc)
-            c->scene_change_score+= ff_sqrt(vard) - ff_sqrt(varc);
+            mest_ctx->scene_change_score+= ff_sqrt(vard) - ff_sqrt(varc);
         else
-            c->scene_change_score+= s->m.qscale;
+            mest_ctx->scene_change_score+= s->m.qscale;
     }
 
     if(level!=s->block_max_depth){
@@ -667,22 +673,10 @@ static int get_block_rd(SnowContext *s, int mb_x, int mb_y, int plane_index, uin
     }
 
     if(block_w==16){
-        /* FIXME rearrange dsputil to fit 32x32 cmp functions */
-        /* FIXME check alignment of the cmp wavelet vs the encoding wavelet */
-        /* FIXME cmps overlap but do not cover the wavelet's whole support.
-         * So improving the score of one block is not strictly guaranteed
-         * to improve the score of the whole frame, thus iterative motion
-         * estimation does not always converge. */
-        if(s->avctx->me_cmp == FF_CMP_W97)
-            distortion = ff_w97_32_c(&s->m, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, 32);
-        else if(s->avctx->me_cmp == FF_CMP_W53)
-            distortion = ff_w53_32_c(&s->m, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, 32);
-        else{
-            distortion = 0;
-            for(i=0; i<4; i++){
-                int off = sx+16*(i&1) + (sy+16*(i>>1))*ref_stride;
-                distortion += s->mecc.me_cmp[0](&s->m, src + off, dst + off, ref_stride, 16);
-            }
+        distortion = 0;
+        for(i=0; i<4; i++){
+            int off = sx+16*(i&1) + (sy+16*(i>>1))*ref_stride;
+            distortion += s->mecc.me_cmp[0](&s->m, src + off, dst + off, ref_stride, 16);
         }
     }else{
         av_assert2(block_w==8);
@@ -772,6 +766,7 @@ static int get_4block_rd(SnowContext *s, int mb_x, int mb_y, int plane_index){
     return distortion + rate*penalty_factor;
 }
 
+#if 0 //DSM_ONLY_MEMC
 static int encode_subband_c0run(SnowContext *s, SubBand *b, const IDWTELEM *src, const IDWTELEM *parent, int stride, int orientation){
     const int w= b->width;
     const int h= b->height;
@@ -893,11 +888,12 @@ static int encode_subband_c0run(SnowContext *s, SubBand *b, const IDWTELEM *src,
 }
 
 static int encode_subband(SnowContext *s, SubBand *b, const IDWTELEM *src, const IDWTELEM *parent, int stride, int orientation){
-//    encode_subband_qtree(s, b, src, parent, stride, orientation);
-//    encode_subband_z0run(s, b, src, parent, stride, orientation);
+ //    encode_subband_qtree(s, b, src, parent, stride, orientation);
+ //    encode_subband_z0run(s, b, src, parent, stride, orientation);
     return encode_subband_c0run(s, b, src, parent, stride, orientation);
-//    encode_subband_dzr(s, b, src, parent, stride, orientation);
+ //    encode_subband_dzr(s, b, src, parent, stride, orientation);
 }
+#endif
 
 static av_always_inline int check_block(SnowContext *s, int mb_x, int mb_y, int p[3], int intra, uint8_t (*obmc_edged)[MB_SIZE * 2], int *best_rd){
     const int b_stride= s->b_width << s->block_max_depth;
@@ -1240,6 +1236,7 @@ static void encode_blocks(SnowContext *s, int search){
     }
 }
 
+#if 0 //DSM_ONLY_MEMC
 static void quantize(SnowContext *s, SubBand *b, IDWTELEM *dst, DWTELEM *src, int stride, int bias){
     const int w= b->width;
     const int h= b->height;
@@ -1370,6 +1367,7 @@ static void correlate(SnowContext *s, SubBand *b, IDWTELEM *src, int stride, int
         }
     }
 }
+#endif
 
 static void encode_qlogs(SnowContext *s){
     int plane_index, level, orientation;
@@ -1384,7 +1382,7 @@ static void encode_qlogs(SnowContext *s){
     }
 }
 
-static void encode_header(SnowContext *s){
+static void encode_header(SnowContext *s) {
     int plane_index, i;
     uint8_t kstate[32];
 
@@ -1417,7 +1415,7 @@ static void encode_header(SnowContext *s){
             put_symbol(&s->c, s->header_state, s->chroma_v_shift, 0);
         }
         put_rac(&s->c, s->header_state, s->spatial_scalability);
-//        put_rac(&s->c, s->header_state, s->rate_scalability);
+        //put_rac(&s->c, s->header_state, s->rate_scalability);
         put_symbol(&s->c, s->header_state, s->max_ref_frames-1, 0);
 
         encode_qlogs(s);
@@ -1454,7 +1452,6 @@ static void encode_header(SnowContext *s){
     put_symbol(&s->c, s->header_state, s->mv_scale        - s->last_mv_scale, 1);
     put_symbol(&s->c, s->header_state, s->qbias           - s->last_qbias   , 1);
     put_symbol(&s->c, s->header_state, s->block_max_depth - s->last_block_max_depth, 1);
-
 }
 
 static void update_last_header_values(SnowContext *s){
@@ -1482,6 +1479,7 @@ static int qscale2qlog(int qscale){
            + 61*QROOT/8; ///< 64 > 60
 }
 
+#if 0 //DSM_ONLY_MEMC
 static int ratecontrol_1pass(SnowContext *s, AVFrame *pict)
 {
     /* Estimate the frame's complexity as a sum of weighted dwt coefficients.
@@ -1533,6 +1531,7 @@ static int ratecontrol_1pass(SnowContext *s, AVFrame *pict)
     s->qlog+= delta_qlog;
     return delta_qlog;
 }
+#endif
 
 static void calculate_visual_weight(SnowContext *s, Plane *p){
     int width = p->width;
@@ -1568,7 +1567,7 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     AVFrame *pic;
     const int width= s->avctx->width;
     const int height= s->avctx->height;
-    int level, orientation, plane_index, i, y, ret;
+    int /*level, orientation,*/ plane_index, i, y, ret;
     uint8_t rc_header_bak[sizeof(s->header_state)];
     uint8_t rc_block_bak[sizeof(s->block_state)];
 
@@ -1597,6 +1596,7 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     pic->quality = pict->quality;
 
     s->m.picture_number= avctx->frame_number;
+    #if 0 //DSM_NO_PASS2
     if(avctx->flags&AV_CODEC_FLAG_PASS2){
         s->m.pict_type = pic->pict_type = s->m.rc_context.entry[avctx->frame_number].new_pict_type;
         s->keyframe = pic->pict_type == AV_PICTURE_TYPE_I;
@@ -1606,9 +1606,12 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                 return -1;
         }
     }else{
+    #endif
         s->keyframe= avctx->gop_size==0 || avctx->frame_number % avctx->gop_size == 0;
         s->m.pict_type = pic->pict_type = s->keyframe ? AV_PICTURE_TYPE_I : AV_PICTURE_TYPE_P;
+    #if 0 //DSM_NO_PASS2
     }
+    #endif
 
     if(s->pass1_rc && avctx->frame_number == 0)
         pic->quality = 2*FF_QP2LAMBDA;
@@ -1701,7 +1704,9 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         memcpy(rc_block_bak, s->block_state, sizeof(s->block_state));
     }
 
+#if 0 //DSM_ONLY_MEMC
 redo_frame:
+#endif
 
     s->spatial_decomposition_count= 5;
 
@@ -1735,8 +1740,9 @@ redo_frame:
         int w= p->width;
         int h= p->height;
         int x, y;
-//        int bits= put_bits_count(&s->c.pb);
+        //int bits= put_bits_count(&s->c.pb);
 
+        #if 0 //DSM_ONLY_MEMC
         if (!s->memc_only) {
             //FIXME optimize
             if(pict->data[plane_index]) //FIXME gray hack
@@ -1747,12 +1753,12 @@ redo_frame:
                 }
             predict_plane(s, s->spatial_idwt_buffer, plane_index, 0);
 
-#if FF_API_PRIVATE_OPT
-FF_DISABLE_DEPRECATION_WARNINGS
+            #if FF_API_PRIVATE_OPT
+            FF_DISABLE_DEPRECATION_WARNINGS
             if(s->avctx->scenechange_threshold)
                 s->scenechange_threshold = s->avctx->scenechange_threshold;
-FF_ENABLE_DEPRECATION_WARNINGS
-#endif
+            FF_ENABLE_DEPRECATION_WARNINGS
+            #endif
 
             if(   plane_index==0
                && pic->pict_type == AV_PICTURE_TYPE_P
@@ -1819,7 +1825,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
                 }
             }
 
-            ff_spatial_idwt(s->spatial_idwt_buffer, s->temp_idwt_buffer, w, h, w, s->spatial_decomposition_type, s->spatial_decomposition_count);
+            spatial_idwt(s->spatial_idwt_buffer, s->temp_idwt_buffer, w, h, w, s->spatial_decomposition_type, s->spatial_decomposition_count);
             if(s->qlog == LOSSLESS_QLOG){
                 for(y=0; y<h; y++){
                     for(x=0; x<w; x++){
@@ -1829,6 +1835,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
             }
             predict_plane(s, s->spatial_idwt_buffer, plane_index, 1);
         }else{
+        #endif
             //ME/MC only
             if(pic->pict_type == AV_PICTURE_TYPE_I){
                 for(y=0; y<h; y++){
@@ -1841,7 +1848,11 @@ FF_ENABLE_DEPRECATION_WARNINGS
                 memset(s->spatial_idwt_buffer, 0, sizeof(IDWTELEM)*w*h);
                 predict_plane(s, s->spatial_idwt_buffer, plane_index, 1);
             }
+        #if 0 //DSM_ONLY_MEMC
         }
+        #endif
+
+        #if 0 //DSM_PSNR_FLAG
         if(s->avctx->flags&AV_CODEC_FLAG_PSNR){
             int64_t error= 0;
 
@@ -1855,6 +1866,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
             s->avctx->error[plane_index] += error;
             s->encoding_error[plane_index] = error;
         }
+        #endif
 
     }
     emms_c();
@@ -1885,6 +1897,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
 
     emms_c();
 
+    #if 0 //DSM_ENCODER_SIDEDATA
     ff_side_data_set_encoder_stats(pkt, s->current_picture->quality,
                                    s->encoding_error,
                                    (s->avctx->flags&AV_CODEC_FLAG_PSNR) ? 4 : 0,
@@ -1895,6 +1908,7 @@ FF_DISABLE_DEPRECATION_WARNINGS
     memcpy(s->current_picture->error, s->encoding_error, sizeof(s->encoding_error));
 FF_ENABLE_DEPRECATION_WARNINGS
 #endif
+    #endif
 
     pkt->size = ff_rac_terminate(c);
     if (s->current_picture->key_frame)
@@ -1925,10 +1939,10 @@ static const AVOption options[] = {
     { "no_bitstream",   "Skip final bitstream writeout.",                    OFFSET(no_bitstream), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     { "intra_penalty",  "Penalty for intra blocks in block decission",      OFFSET(intra_penalty), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, VE },
     { "iterative_dia_size",  "Dia size for the iterative ME",          OFFSET(iterative_dia_size), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, VE },
-    { "sc_threshold",   "Scene change threshold",                   OFFSET(scenechange_threshold), AV_OPT_TYPE_INT, { .i64 = 0 }, INT_MIN, INT_MAX, VE },
-    { "pred",           "Spatial decomposition type",                                OFFSET(pred), AV_OPT_TYPE_INT, { .i64 = 0 }, DWT_97, DWT_53, VE, "pred" },
+    { "sc_threshold",   "Scene change threshold",                   OFFSET(sc_threshold), AV_OPT_TYPE_INT, { .i64 = 0 }, INT_MIN, INT_MAX, VE },
+    { "pred",           "Spatial decomposition type",                                OFFSET(pred), AV_OPT_TYPE_INT, { .i64 = 0 }, DWT_97, DWT_97, VE, "pred" },
         { "dwt97", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 0 }, INT_MIN, INT_MAX, VE, "pred" },
-        { "dwt53", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, INT_MIN, INT_MAX, VE, "pred" },
+        /*{ "dwt53", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = 1 }, INT_MIN, INT_MAX, VE, "pred" },*/
     { NULL },
 };
 
@@ -1940,8 +1954,6 @@ static const AVClass snowenc_class = {
 };
 
 AVCodec snow_encoder = {
-    .name           = "snow",
-    .long_name      = NULL_IF_CONFIG_SMALL("Snow"),
     .type           = AVMEDIA_TYPE_VIDEO,
     .id             = AV_CODEC_ID_SNOW,
     .priv_data_size = sizeof(SnowContext),
