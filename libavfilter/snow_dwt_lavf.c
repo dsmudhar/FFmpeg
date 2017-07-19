@@ -168,7 +168,7 @@ static void spatial_idwt_slice(DWTCompose *cs, IDWTELEM *buffer,
         }
 }
 
-void ff_spatial_idwt(IDWTELEM *buffer, IDWTELEM *temp, int width, int height,
+void snow_spatial_idwt(IDWTELEM *buffer, IDWTELEM *temp, int width, int height,
                      int stride, int type, int decomposition_count)
 {
     DWTCompose cs[MAX_DECOMPOSITIONS];
