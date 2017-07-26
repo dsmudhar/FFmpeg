@@ -32,7 +32,7 @@
 #include "libavcodec/rangecoder.h"
 #include "libavcodec/mathops.h"
 
-#define FF_MPV_OFFSET(x) (offsetof(MpegEncContext, x) + offsetof(SnowContext, m))
+#define FF_MPV_OFFSET(x) (offsetof(MpegEncContext, x) + offsetof(SnowContext, mpeg))
 #include "libavcodec/mpegvideo.h"
 #include "libavcodec/h264qpel.h"
 
@@ -179,7 +179,7 @@ typedef struct SnowContext{
     int iterative_dia_size;
     int sc_threshold;
 
-    MpegEncContext m; // needed for motion estimation, should not be used for anything else, the idea is to eventually make the motion estimation independent of MpegEncContext, so this will be removed then (FIXME/XXX)
+    MpegEncContext mpeg; // needed for motion estimation, should not be used for anything else, the idea is to eventually make the motion estimation independent of MpegEncContext, so this will be removed then (FIXME/XXX)
 
     uint8_t *scratchbuf;
     uint8_t *emu_edge_buffer;
