@@ -22,7 +22,7 @@
 #include "libavutil/attributes.h"
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
-#include "libavcodec/me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "snow_dwt_lavf.h"
 
 static void snow_horizontal_compose97i(IDWTELEM *b, IDWTELEM *temp, int width)

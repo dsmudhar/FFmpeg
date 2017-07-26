@@ -23,7 +23,7 @@
 #include "libavutil/opt.h"
 
 #include "libavcodec/avcodec.h"
-#include "libavcodec/me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "libavcodec/internal.h"
 #include "libavcodec/rangecoder.h"
 #include "libavcodec/mathops.h"

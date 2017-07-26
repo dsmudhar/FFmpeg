@@ -41,9 +41,8 @@
 
 #define FF_ME_ITER 50
 
-static av_cold int encode_init(AVCodecContext *avctx)
+static av_cold int encode_init2(AVCodecContext *avctx, SnowContext *s)
 {
-    SnowContext *s = avctx->priv_data;
     int plane_index, ret;
     int i;
 
@@ -156,6 +155,12 @@ FF_ENABLE_DEPRECATION_WARNINGS
     }
 
     return 0;
+}
+
+static av_cold int encode_init(AVCodecContext *avctx)
+{
+    SnowContext *s = avctx->priv_data;
+    return encode_init2(avctx, s);
 }
 
 
@@ -1610,6 +1615,12 @@ static void calculate_visual_weight(SnowContext *s, Plane *p){
 static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
                         const AVFrame *pict, int *got_packet)
 {
+    return 0;
+}
+
+static int snow_encode_frame(AVCodecContext *avctx, AVPacket *pkt,
+                        const AVFrame *pict, int *got_packet, int *flags)
+{
     SnowContext *s = avctx->priv_data;
     RangeCoder * const c= &s->c;
     AVFrame *pic;
@@ -1618,6 +1629,8 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
     int /*level, orientation,*/ plane_index, i, y, ret;
     uint8_t rc_header_bak[sizeof(s->header_state)];
     uint8_t rc_block_bak[sizeof(s->block_state)];
+
+    *flags = 0;
 
     if ((ret = ff_alloc_packet2(avctx, pkt, s->b_width*s->b_height*MB_SIZE*MB_SIZE*3 + AV_INPUT_BUFFER_MIN_SIZE, 0)) < 0)
         return ret;
@@ -1814,9 +1827,9 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 
     emms_c();
 
-    pkt->size = ff_rac_terminate(c);
+    //pkt->size = ff_rac_terminate(c);
     if (s->current_picture->key_frame)
-        pkt->flags |= AV_PKT_FLAG_KEY;
+        *flags |= AV_PKT_FLAG_KEY;
     *got_packet = 1;
 
     return 0;

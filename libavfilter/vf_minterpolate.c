@@ -197,8 +197,9 @@ typedef struct MIContext {
 
     int log2_mv_precission;
     AVCodecContext *avctx_enc[2];
-    uint8_t *outbuf;
-    int outbuf_size;
+    //uint8_t *outbuf;
+    //int outbuf_size;
+    int nb_frames_written;
 } MIContext;
 
 #define OFFSET(x) offsetof(MIContext, x)
@@ -407,6 +408,7 @@ static int config_input(AVFilterLink *inlink)
         }
   //} else:
 
+    mi_ctx->nb_frames_written = 0;
     /* Codec Init */
     mi_ctx->log2_mv_precission = 2;
     //enc = avcodec_find_encoder(AV_CODEC_ID_SNOW);
@@ -434,11 +436,11 @@ static int config_input(AVFilterLink *inlink)
         avctx_enc->gop_size = i ? 2 : INT_MAX;
         avctx_enc->max_b_frames = 0;
         avctx_enc->pix_fmt = inlink->format;
-        avctx_enc->flags = CODEC_FLAG_QSCALE | CODEC_FLAG_LOW_DELAY;
+        avctx_enc->flags = /*CODEC_FLAG_QSCALE |*/ CODEC_FLAG_LOW_DELAY;
         if (mi_ctx->log2_mv_precission > 1)
             avctx_enc->flags |= CODEC_FLAG_QPEL;
         avctx_enc->strict_std_compliance = FF_COMPLIANCE_EXPERIMENTAL;
-        avctx_enc->global_quality = 12;
+        avctx_enc->global_quality = 0;
         avctx_enc->me_method = ME_ITER;
         // avctx_enc->dia_size = 16;
         avctx_enc->mb_decision = FF_MB_DECISION_RD;
@@ -449,6 +451,8 @@ static int config_input(AVFilterLink *inlink)
 
         av_dict_set(&opts, "no_bitstream", "1", 0);
         av_dict_set(&opts, "intra_penalty", "500", 0);
+        av_dict_set(&opts, "memc_only", "1", 0);
+        av_dict_set(&opts, "pred", "dwt97", 0);
         ret = avcodec_open2(avctx_enc, enc, &opts);
         av_dict_free(&opts);
         if (ret < 0)
@@ -456,11 +460,11 @@ static int config_input(AVFilterLink *inlink)
         av_assert0(avctx_enc->codec);
     }
 
-    mi_ctx->outbuf_size = (width + 16) * (height + 16) * 10;
+    /*mi_ctx->outbuf_size = (width + 16) * (height + 16) * 10;
     if (!(mi_ctx->outbuf = av_malloc(mi_ctx->outbuf_size))) {
         ret = AVERROR(ENOMEM);
         goto fail;
-    }
+    }*/
 
     return 0;
 
@@ -893,6 +897,34 @@ static int fill_halfpel(MIContext *mi_ctx, Frame *frame)
     return 0;
 }
 
+static int write_mvs(MIContext *mi_ctx, Frame *frame, int dir)
+{
+
+    int x, y;
+    char buffer[200];
+    int w = mi_ctx->b_width;
+
+    sprintf(buffer, "/Users/dsm/Mac/Frames/mvs/frame_%03d_dir_%d.txt", mi_ctx->nb_frames_written, 0);
+
+    FILE *f = fopen(buffer, "w");
+    if (f == NULL) {
+        printf("Error opening file! ~/Mac/Frames/mvs/frame_%3d.txt\n", mi_ctx->nb_frames_written);
+        return AVERROR(ENOMEM);
+    }
+
+    for (y = 0; y < mi_ctx->b_height; y++)
+        for (x = 0; x < mi_ctx->b_width; x++)
+
+    fprintf(f, "x=%d,y=%d,dir=%d,ref=%d,mvx=%d,mvy=%d\n", x,y,dir,frame->ref[dir][x + y*w],frame->mv[dir][x + y*w][0],frame->mv[dir][x + y*w][1]);
+
+    fclose(f);
+
+    //if (!dir)
+        mi_ctx->nb_frames_written++;
+    return 0;
+
+}
+
 static int extract_mvs(MIContext *mi_ctx, Frame *frame, int dir)
 {
     if (!frame->mv[dir])
@@ -905,6 +937,28 @@ static int extract_mvs(MIContext *mi_ctx, Frame *frame, int dir)
     return ff_get_mvs_snow(mi_ctx->avctx_enc[dir], frame->mv[dir], frame->ref[dir],
                           mi_ctx->b_width, mi_ctx->b_height);
 }
+
+static int attribute_align_arg encode2(AVCodecContext *avctx, AVPacket *avpkt,
+                                       const AVFrame *frame, int *got_packet_ptr, int *flags)
+{
+    int ret;
+
+    *got_packet_ptr = 0;
+
+    ret = /*avctx->codec->encode2*/snow_encode_frame(avctx, avpkt, frame, got_packet_ptr, flags);
+    if (!ret) {
+        av_assert0(*got_packet_ptr);
+
+        avctx->frame_number++;
+    }
+
+    if (ret < 0 || !*got_packet_ptr)
+        av_packet_unref(avpkt);
+
+    emms_c();
+    return ret;
+}
+
 
 static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
 {
@@ -992,31 +1046,41 @@ static int inject_frame(AVFilterLink *inlink, AVFrame *avf_in)
             AVPacket pkt = { 0 };
             int got_pkt_ptr;
             int ret;
+            int flags;
 
-            avf_in->quality = 2 * FF_QP2LAMBDA; //FIXME test/adjust
+            //avf_in->quality = 2 * FF_QP2LAMBDA; //FIXME test/adjust
             //FIXME init per MB qscale stuff
 
             av_init_packet(&pkt);
-            pkt.data = mi_ctx->outbuf;
-            pkt.size = mi_ctx->outbuf_size;
+            //pkt.data = mi_ctx->outbuf;
+            //pkt.size = mi_ctx->outbuf_size;
 
-            avcodec_encode_video2(mi_ctx->avctx_enc[0], &pkt, avf_in, &got_pkt_ptr);
-            av_free_packet(&pkt);
+            /*mi_ctx->avctx_enc[0]->codec->*/encode2(mi_ctx->avctx_enc[0], &pkt, avf_in, &got_pkt_ptr, &flags);
+            av_packet_unref(&pkt);
 
             if (mi_ctx->frames[NB_FRAMES - 2].avf) {
-                avcodec_encode_video2(mi_ctx->avctx_enc[1], &pkt, avf_in, &got_pkt_ptr);
-                av_assert0(pkt.flags & AV_PKT_FLAG_KEY);
-                av_free_packet(&pkt);
-                avcodec_encode_video2(mi_ctx->avctx_enc[1], &pkt, mi_ctx->frames[NB_FRAMES - 2].avf, &got_pkt_ptr);
-                av_assert0(!(pkt.flags & AV_PKT_FLAG_KEY));
-                av_free_packet(&pkt);
+                /*mi_ctx->avctx_enc[1]->codec->*/encode2(mi_ctx->avctx_enc[1], &pkt, avf_in, &got_pkt_ptr, &flags);
+                av_assert0(flags & AV_PKT_FLAG_KEY);
+                av_packet_unref(&pkt);
+                /*mi_ctx->avctx_enc[1]->codec->*/encode2(mi_ctx->avctx_enc[1], &pkt, mi_ctx->frames[NB_FRAMES - 2].avf, &got_pkt_ptr, &flags);
+                av_assert0(!(flags & AV_PKT_FLAG_KEY));
+                av_packet_unref(&pkt);
 
                 ret = extract_mvs(mi_ctx, &mi_ctx->frames[NB_FRAMES - 2], 1);
                 av_assert0(ret >= 0);
+
+                if (ret = write_mvs(mi_ctx, &mi_ctx->frames[NB_FRAMES - 2], 1))
+                    return ret;
             }
 
             ret = extract_mvs(mi_ctx, &mi_ctx->frames[NB_FRAMES - 1], 0);
             av_assert0(ret >= 0);
+
+            if (ret = write_mvs(mi_ctx, &mi_ctx->frames[NB_FRAMES - 1], 0))
+                    return ret;
+
+            for (dir = 0; dir < 2; dir++) {
+            }
         }
     }
 
@@ -1537,8 +1601,8 @@ static av_cold void uninit(AVFilterContext *ctx)
         avcodec_close(mi_ctx->avctx_enc[i]);
         av_freep(&mi_ctx->avctx_enc[i]);
     }
-    av_freep(&mi_ctx->outbuf);
-    mi_ctx->outbuf_size = 0;
+    //av_freep(&mi_ctx->outbuf);
+    //mi_ctx->outbuf_size = 0;
 }
 
 static const AVFilterPad minterpolate_inputs[] = {
