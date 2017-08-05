@@ -52,7 +52,7 @@ static int hpel_motion_search(MpegEncContext * s,
                                   int src_index, int ref_index,
                                   int size, int h)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     const int mx = *mx_ptr;
     const int my = *my_ptr;
     const int penalty_factor= c->sub_penalty_factor;
@@ -166,7 +166,7 @@ static inline int get_mb_score(MpegEncContext *s, int mx, int my,
                                int src_index, int ref_index, int size,
                                int h, int add_rate)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     const int penalty_factor= c->mb_penalty_factor;
     const int flags= c->mb_flags;
     const int qpel= flags & FLAG_QPEL;
@@ -209,7 +209,7 @@ static int qpel_motion_search(MpegEncContext * s,
                                   int src_index, int ref_index,
                                   int size, int h)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     const int mx = *mx_ptr;
     const int my = *my_ptr;
     const int penalty_factor= c->sub_penalty_factor;
@@ -416,7 +416,7 @@ static av_always_inline int small_diamond_search(MpegEncContext * s, int *best, 
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     me_cmp_func cmpf, chroma_cmpf;
     int next_dir=-1;
     LOAD_COMMON
@@ -457,7 +457,7 @@ static int funny_diamond_search(MpegEncContext * s, int *best, int dmin,
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     me_cmp_func cmpf, chroma_cmpf;
     int dia_size;
     LOAD_COMMON
@@ -499,7 +499,7 @@ static int hex_search(MpegEncContext * s, int *best, int dmin,
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags, int dia_size)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     me_cmp_func cmpf, chroma_cmpf;
     LOAD_COMMON
     LOAD_COMMON2
@@ -533,7 +533,7 @@ static int l2s_dia_search(MpegEncContext * s, int *best, int dmin,
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     me_cmp_func cmpf, chroma_cmpf;
     LOAD_COMMON
     LOAD_COMMON2
@@ -571,7 +571,7 @@ static int umh_search(MpegEncContext * s, int *best, int dmin,
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     me_cmp_func cmpf, chroma_cmpf;
     LOAD_COMMON
     LOAD_COMMON2
@@ -618,7 +618,7 @@ static int full_search(MpegEncContext * s, int *best, int dmin,
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     me_cmp_func cmpf, chroma_cmpf;
     LOAD_COMMON
     LOAD_COMMON2
@@ -681,7 +681,7 @@ static int sab_diamond_search(MpegEncContext * s, int *best, int dmin,
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     me_cmp_func cmpf, chroma_cmpf;
     Minima minima[MAX_SAB_SIZE];
     const int minima_count= FFABS(c->dia_size);
@@ -771,7 +771,7 @@ static int var_diamond_search(MpegEncContext * s, int *best, int dmin,
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     me_cmp_func cmpf, chroma_cmpf;
     int dia_size;
     LOAD_COMMON
@@ -831,7 +831,7 @@ static int var_diamond_search(MpegEncContext * s, int *best, int dmin,
 static av_always_inline int diamond_search(MpegEncContext * s, int *best, int dmin,
                                        int src_index, int ref_index, const int penalty_factor,
                                        int size, int h, int flags){
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     if(c->dia_size==-1)
         return funny_diamond_search(s, best, dmin, src_index, ref_index, penalty_factor, size, h, flags);
     else if(c->dia_size<-1)
@@ -860,7 +860,7 @@ static av_always_inline int epzs_motion_search_internal(MpegEncContext * s, int 
                              int P[10][2], int src_index, int ref_index, int16_t (*last_mv)[2],
                              int ref_mv_scale, int flags, int size, int h)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     int best[2]={0, 0};      /**< x and y coordinates of the best motion vector.
                                i.e. the difference between the position of the
                                block currently being encoded and the position of
@@ -978,7 +978,7 @@ int ff_epzs_motion_search(MpegEncContext *s, int *mx_ptr, int *my_ptr,
                           int16_t (*last_mv)[2], int ref_mv_scale,
                           int size, int h)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
 //FIXME convert other functions in the same way if faster
     if(c->flags==0 && h==16 && size==0){
         return epzs_motion_search_internal(s, mx_ptr, my_ptr, P, src_index, ref_index, last_mv, ref_mv_scale, 0, 0, 16);
@@ -994,7 +994,7 @@ static int epzs_motion_search4(MpegEncContext * s,
                              int src_index, int ref_index, int16_t (*last_mv)[2],
                              int ref_mv_scale)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     int best[2]={0, 0};
     int d, dmin;
     unsigned map_generation;
@@ -1053,7 +1053,7 @@ static int epzs_motion_search2(MpegEncContext * s,
                              int src_index, int ref_index, int16_t (*last_mv)[2],
                              int ref_mv_scale)
 {
-    MotionEstContext * const c= &s->me;
+    AVMotionContext * const c= &s->me;
     int best[2]={0, 0};
     int d, dmin;
     unsigned map_generation;

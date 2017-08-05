@@ -18,8 +18,8 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVCODEC_MOTION_EST_H
-#define AVCODEC_MOTION_EST_H
+#ifndef AVMOTION_MOTION_EST_H
+#define AVMOTION_MOTION_EST_H
 
 #include <stdint.h>
 
@@ -44,7 +44,7 @@ struct MpegEncContext;
 /**
  * Motion estimation context.
  */
-typedef struct MotionEstContext {
+typedef struct AVMotionContext {
     AVCodecContext *avctx;
     int skip;                       ///< set if ME is skipped for the current MB
     int co_located_mv[4][2];        ///< mv from last P-frame for direct mode ME
@@ -96,7 +96,7 @@ typedef struct MotionEstContext {
                              int *mx_ptr, int *my_ptr, int dmin,
                              int src_index, int ref_index,
                              int size, int h);
-} MotionEstContext;
+} AVMotionContext;
 
 static inline int ff_h263_round_chroma(int x)
 {
@@ -132,4 +132,4 @@ void ff_fix_long_mvs(struct MpegEncContext *s, uint8_t *field_select_table,
                      int field_select, int16_t (*mv_table)[2], int f_code,
                      int type, int truncate);
 
-#endif /* AVCODEC_MOTION_EST_H */
+#endif /* AVMOTION_MOTION_EST_H */
