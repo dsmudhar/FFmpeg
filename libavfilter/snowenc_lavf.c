@@ -451,7 +451,7 @@ static inline void set_blocks(SnowContext *s, int level, int x, int y, int l, in
     }
 }
 
-static inline void init_ref(AVMotionContext *c, uint8_t *src[3], uint8_t *ref[3], uint8_t *ref2[3], int x, int y, int ref_index){
+static inline void init_ref(MotionEstContext *c, uint8_t *src[3], uint8_t *ref[3], uint8_t *ref2[3], int x, int y, int ref_index){
     SnowContext *s = c->avctx->priv_data;
     const int offset[3]= {
           y*c->  stride + x,
@@ -634,7 +634,7 @@ static int encode_q_branch(SnowContext *s, int level, int x, int y){
     int16_t last_mv[3][2];
     int qpel= !!(s->avctx->flags & AV_CODEC_FLAG_QPEL); //unused
     const int shift= 1+qpel;
-    AVMotionContext *mest_ctx= &s->mpeg.me;
+    MotionEstContext *mest_ctx= &s->mpeg.me;
     int ref_context= av_log2(2*left->ref) + av_log2(2*top->ref);
     int mx_context= av_log2(2*FFABS(left->mx - top->mx));
     int my_context= av_log2(2*FFABS(left->my - top->my));
