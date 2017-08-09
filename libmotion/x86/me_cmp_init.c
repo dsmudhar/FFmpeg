@@ -436,7 +436,7 @@ static inline void sad8_y2a_mmx(uint8_t *blk1, uint8_t *blk2,
 static int sad8_ ## suf(MpegEncContext *v, uint8_t *blk2,               \
                         uint8_t *blk1, ptrdiff_t stride, int h)         \
 {                                                                       \
-    av_assert2(h == 8);                                                     \
+    av_assert2(h == 8);                                                 \
     __asm__ volatile (                                                  \
         "pxor %%mm7, %%mm7     \n\t"                                    \
         "pxor %%mm6, %%mm6     \n\t"                                    \
@@ -450,7 +450,7 @@ static int sad8_ ## suf(MpegEncContext *v, uint8_t *blk2,               \
 static int sad8_x2_ ## suf(MpegEncContext *v, uint8_t *blk2,            \
                            uint8_t *blk1, ptrdiff_t stride, int h)      \
 {                                                                       \
-    av_assert2(h == 8);                                                     \
+    av_assert2(h == 8);                                                 \
     __asm__ volatile (                                                  \
         "pxor %%mm7, %%mm7     \n\t"                                    \
         "pxor %%mm6, %%mm6     \n\t"                                    \
@@ -465,7 +465,7 @@ static int sad8_x2_ ## suf(MpegEncContext *v, uint8_t *blk2,            \
 static int sad8_y2_ ## suf(MpegEncContext *v, uint8_t *blk2,            \
                            uint8_t *blk1, ptrdiff_t stride, int h)      \
 {                                                                       \
-    av_assert2(h == 8);                                                     \
+    av_assert2(h == 8);                                                 \
     __asm__ volatile (                                                  \
         "pxor %%mm7, %%mm7     \n\t"                                    \
         "pxor %%mm6, %%mm6     \n\t"                                    \
@@ -480,7 +480,7 @@ static int sad8_y2_ ## suf(MpegEncContext *v, uint8_t *blk2,            \
 static int sad8_xy2_ ## suf(MpegEncContext *v, uint8_t *blk2,           \
                             uint8_t *blk1, ptrdiff_t stride, int h)     \
 {                                                                       \
-    av_assert2(h == 8);                                                     \
+    av_assert2(h == 8);                                                 \
     __asm__ volatile (                                                  \
         "pxor %%mm7, %%mm7     \n\t"                                    \
         "pxor %%mm6, %%mm6     \n\t"                                    \
