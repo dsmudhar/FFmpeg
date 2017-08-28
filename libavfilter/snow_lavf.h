@@ -19,48 +19,65 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifndef AVCODEC_SNOW_H
-#define AVCODEC_SNOW_H
+#ifndef AVFILTER_SNOW_LAVF_H
+#define AVFILTER_SNOW_LAVF_H
 
 #include "libavutil/motion_vector.h"
 
 #include "libavcodec/hpeldsp.h"
 #include "libavcodec/me_cmp.h"
 #include "libavcodec/qpeldsp.h"
-#include "snow_dwt_lavf.h"
 
 #include "libavcodec/rangecoder.h"
 #include "libavcodec/mathops.h"
 
-#define FF_MPV_OFFSET(x) (offsetof(MpegEncContext, x) + offsetof(SnowContext, mpeg))
+//#define MAX_DECOMPOSITIONS 8
+
+#define FF_MPV_OFFSET(x) (offsetof(MpegEncContext, x) + offsetof(LavfSnowContext, mpeg))
 #include "libavcodec/mpegvideo.h"
 #include "libavcodec/h264qpel.h"
+
+/*typedef struct LavfDWTCompose {
+    short *b0;
+    short *b1;
+    short *b2;
+    short *b3;
+    int y;
+} LavfDWTCompose;*/
+
+/** Used to minimize the amount of memory used in order to
+ *  optimize cache performance. **/
+/*typedef struct lavf_slice_buffer_s {
+    short **line;   ///< For use by idwt and predict_slices.
+    short **data_stack;   ///< Used for internal purposes.
+    int data_stack_top;
+    int line_count;
+    int line_width;
+    int data_count;
+    short *base_buffer;  ///< Buffer that this structure is caching.
+} lavf_slice_buffer;*/
 
 #define MID_STATE 128
 
 #define MAX_PLANES 4
 #define QSHIFT 5
 #define QROOT (1<<QSHIFT)
-#define LOSSLESS_QLOG -128
 #define FRAC_BITS 4
 #define MAX_REF_FRAMES 8
 
 #define LOG2_OBMC_MAX 8
-#define OBMC_MAX (1<<(LOG2_OBMC_MAX))
-typedef struct BlockNode{
+typedef struct LavfBlockNode {
     int16_t mx;                 ///< Motion vector component X, see mv_scale
     int16_t my;                 ///< Motion vector component Y, see mv_scale
     uint8_t ref;                ///< Reference frame index
     uint8_t color[3];           ///< Color for intra
     uint8_t type;               ///< Bitfield of BLOCK_*
-//#define TYPE_SPLIT    1
 #define BLOCK_INTRA   1         ///< Intra block, inter otherwise
 #define BLOCK_OPT     2         ///< Block needs no checks in this round of iterative motion estiation
-//#define TYPE_NOCOLOR  4
     uint8_t level; //FIXME merge into type?
-}BlockNode;
+} LavfBlockNode;
 
-static const BlockNode null_block= { //FIXME add border maybe
+static const LavfBlockNode null_block= { //FIXME add border maybe
     .color= {128,128,128},
     .mx= 0,
     .my= 0,
@@ -71,49 +88,46 @@ static const BlockNode null_block= { //FIXME add border maybe
 
 #define LOG2_MB_SIZE 4
 #define MB_SIZE (1<<LOG2_MB_SIZE)
-#define ENCODER_EXTRA_BITS 4
 #define HTAPS_MAX 8
 
-typedef struct x_and_coeff{
+/*typedef struct lavf_x_and_coeff {
     int16_t x;
     uint16_t coeff;
-} x_and_coeff;
+} lavf_x_and_coeff;*/
 
-typedef struct SubBand{
+/*typedef struct LavfSubBand {
     int level;
     int stride;
     int width;
     int height;
-    int qlog;        ///< log(qscale)/log[2^(1/6)]
-    DWTELEM *buf;
-    IDWTELEM *ibuf;
+    //int qlog;        ///< log(qscale)/log[2^(1/6)]
+    int *buf;
+    short *ibuf;
     int buf_x_offset;
     int buf_y_offset;
     int stride_line; ///< Stride measured in lines, not pixels.
-    x_and_coeff * x_coeff;
-    struct SubBand *parent;
-    uint8_t state[/*7*2*/ 7 + 512][32];
-}SubBand;
+    lavf_x_and_coeff * x_coeff;
+    struct LavfSubBand *parent;
+    uint8_t state[/ * 7*2 * / 7 + 512][32];
+} LavfSubBand;*/
 
-typedef struct Plane{
+typedef struct LavfPlane {
     int width;
     int height;
-    SubBand band[MAX_DECOMPOSITIONS][4];
-
-    int htaps;
     int8_t hcoeff[HTAPS_MAX/2];
-    int diag_mc;
     int fast_mc;
-
+    /*LavfSubBand band[MAX_DECOMPOSITIONS][4];
+    int htaps;
+    int diag_mc;
     int last_htaps;
     int8_t last_hcoeff[HTAPS_MAX/2];
-    int last_diag_mc;
-}Plane;
+    int last_diag_mc;*/
+} LavfPlane;
 
-typedef struct SnowContext{
+typedef struct LavfSnowContext {
     AVClass *class;
     AVCodecContext *avctx;
-    RangeCoder c;
+    //RangeCoder c;
     MECmpContext mecc;
     HpelDSPContext hdsp;
     QpelDSPContext qdsp;
@@ -121,63 +135,63 @@ typedef struct SnowContext{
     H264QpelContext h264qpel;
     MpegvideoEncDSPContext mpvencdsp;
     //SnowDWTContext dwt;
-    AVFrame *input_picture;              ///< new_picture with the internal linesizes
-    AVFrame *current_picture;
-    AVFrame *last_picture[MAX_REF_FRAMES];
+    AVFrame *input_avframe;              ///< new_picture with the internal linesizes
+    AVFrame *current_avframe;
+    AVFrame *last_avframe[MAX_REF_FRAMES];
     uint8_t *halfpel_plane[MAX_REF_FRAMES][4][4];
-    AVFrame *mconly_picture;
+    AVFrame *mconly_avframe;
 //     uint8_t q_context[16];
-    uint8_t header_state[32];
+    //uint8_t header_state[32];
     uint8_t block_state[128 + 32*128];
     int keyframe;
-    int always_reset;
-    int version;
-    int spatial_decomposition_type;
-    int last_spatial_decomposition_type;
-    int temporal_decomposition_type;
-    int spatial_decomposition_count;
-    int last_spatial_decomposition_count;
-    int temporal_decomposition_count;
+    //int always_reset;
+    //int version;
+    //int spatial_decomposition_type;
+    //int last_spatial_decomposition_type;
+    //int temporal_decomposition_type;
+    //int spatial_decomposition_count;
+    //int last_spatial_decomposition_count;
+    //int temporal_decomposition_count;
     int max_ref_frames;
     int ref_frames;
     int16_t (*ref_mvs[MAX_REF_FRAMES])[2];
     uint32_t *ref_scores[MAX_REF_FRAMES];
-    DWTELEM *spatial_dwt_buffer;
-    DWTELEM *temp_dwt_buffer;
-    IDWTELEM *spatial_idwt_buffer;
-    IDWTELEM *temp_idwt_buffer;
-    int *run_buffer;
-    int colorspace_type;
+    //int *spatial_dwt_buffer;
+    //int *temp_dwt_buffer;
+    //short *spatial_idwt_buffer;
+    //short *temp_idwt_buffer;
+    //int *run_buffer;
+    //int colorspace_type;
     int chroma_h_shift;
     int chroma_v_shift;
-    int spatial_scalability;
-    int qlog;
-    int last_qlog;
+    //int spatial_scalability;
+    //int qlog;
+    //int last_qlog;
     int lambda;
     int lambda2;
     int pass1_rc;
     int mv_scale;
-    int last_mv_scale;
-    int qbias;
-    int last_qbias;
+    //int last_mv_scale;
+    //int qbias;
+    //int last_qbias;
 #define QBIAS_SHIFT 3
     int b_width;
     int b_height;
     int block_max_depth;
-    int last_block_max_depth;
+    //int last_block_max_depth;
     int nb_planes;
-    Plane plane[MAX_PLANES];
-    BlockNode *block;
+    LavfPlane plane[MAX_PLANES];
+    LavfBlockNode *block;
 #define ME_CACHE_SIZE 1024
     unsigned me_cache[ME_CACHE_SIZE];
     unsigned me_cache_generation;
-    slice_buffer sb;
-    int memc_only;
-    int no_bitstream;
+    //lavf_slice_buffer sb;
+    //int memc_only;
+    //int no_bitstream;
     int intra_penalty;
     int motion_est;
     int iterative_dia_size;
-    int sc_threshold;
+    //int sc_threshold;
 
     MpegEncContext mpeg; // needed for motion estimation, should not be used for anything else, the idea is to eventually make the motion estimation independent of MpegEncContext, so this will be removed then (FIXME/XXX)
 
@@ -186,33 +200,23 @@ typedef struct SnowContext{
 
     AVMotionVector *avmv;
     int avmv_index;
-    uint64_t encoding_error[AV_NUM_DATA_POINTERS];
+    //uint64_t encoding_error[AV_NUM_DATA_POINTERS];
 
-    int pred;
-}SnowContext;
+    //int pred;
+} LavfSnowContext;
 
-/* common code */
-
-int ff_snow_common_init(AVCodecContext *avctx);
-int ff_snow_common_init_after_header(AVCodecContext *avctx);
-void ff_snow_common_end(SnowContext *s);
-void ff_snow_release_buffer(AVCodecContext *avctx);
-void ff_snow_reset_contexts(SnowContext *s);
-int ff_snow_alloc_blocks(SnowContext *s);
-int ff_snow_frame_start(SnowContext *s);
-void ff_snow_pred_block(SnowContext *s, uint8_t *dst, uint8_t *tmp, ptrdiff_t stride,
-                     int sx, int sy, int b_w, int b_h, const BlockNode *block,
+int lavfsnow_common_init(AVCodecContext *avctx);
+int lavfsnow_common_init_after_header(AVCodecContext *avctx);
+int lavfsnow_alloc_blocks(LavfSnowContext *s);
+void lavfsnow_pred_block(LavfSnowContext *s, uint8_t *dst, uint8_t *tmp, ptrdiff_t stride,
+                     int sx, int sy, int b_w, int b_h, const LavfBlockNode *block,
                      int plane_index, int w, int h);
-int ff_snow_get_buffer(SnowContext *s, AVFrame *frame);
-int ff_get_mvs_snow(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int w, int h);
-/* common inline functions */
-//XXX doublecheck all of them should stay inlined
+int lavfsnow_get_mvs(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int w, int h);
 
-const int8_t ff_quant3bA[256];
-const uint8_t * const ff_obmc_tab[4];
+AVCodec snow_encoder;
+int lavfsnow_encode_frame(AVCodecContext *avctx, const AVFrame *pict, int *got_packet, int *flags);
 
-/* runtime generated tables */
-uint8_t ff_qexp[QROOT];
-int ff_scale_mv_ref[MAX_REF_FRAMES][MAX_REF_FRAMES];
+const uint8_t * const lavfsnow_obmc_tab[4];
+int lavfsnow_scale_mv_ref[MAX_REF_FRAMES][MAX_REF_FRAMES];
 
-#endif /* AVCODEC_SNOW_H */
+#endif /* AVCODEC_SNOW_LAVF_H */
