@@ -739,7 +739,7 @@ static int encode_q_branch(LavfSnowContext *s, int level, int x, int y){
     /*int s_context= 2*left->level + 2*top->level + tl->level + tr->level;*/
     int ref, best_ref, ref_score, ref_mx, ref_my;
 
-    av_assert0(sizeof(s->block_state) >= 256);
+    //av_assert0(sizeof(s->block_state) >= 256);
     if(s->keyframe){
         set_blocks(s, level, x, y, pl, pcb, pcr, 0, 0, 0, BLOCK_INTRA);
         return 0;
@@ -981,7 +981,7 @@ static void encode_q_branch2(LavfSnowContext *s, int level, int x, int y){
     //}
 }
 
-static int get_dc(LavfSnowContext *s, int mb_x, int mb_y, int plane_index){
+static void get_dc(LavfSnowContext *s, int mb_x, int mb_y, int plane_index){
     int i, x2, y2;
     LavfPlane *p= &s->plane[plane_index];
     const int block_size = MB_SIZE >> s->block_max_depth;
@@ -990,7 +990,7 @@ static int get_dc(LavfSnowContext *s, int mb_x, int mb_y, int plane_index){
     const uint8_t *obmc  = plane_index ? lavfsnow_obmc_tab[s->block_max_depth+s->chroma_h_shift] : lavfsnow_obmc_tab[s->block_max_depth];
     const int obmc_stride= plane_index ? (2*block_size)>>s->chroma_h_shift : 2*block_size;
     const int ref_stride= s->current_avframe->linesize[plane_index];
-    uint8_t *src= s-> input_avframe->data[plane_index];
+    //uint8_t *src= s-> input_avframe->data[plane_index];
     short *dst= (short*)s->mpeg.sc.obmc_scratchpad + plane_index*block_size*block_size*4; //FIXME change to unsigned
     const int b_stride = s->b_width << s->block_max_depth;
     const int w= p->width;
@@ -998,8 +998,8 @@ static int get_dc(LavfSnowContext *s, int mb_x, int mb_y, int plane_index){
     int index= mb_x + mb_y*b_stride;
     LavfBlockNode *b= &s->block[index];
     LavfBlockNode backup= *b;
-    int ab=0;
-    int aa=0;
+    /*int ab=0;
+    int aa=0;*/
 
     av_assert2(s->chroma_h_shift == s->chroma_v_shift); //obmc stuff above
 
@@ -1019,24 +1019,24 @@ static int get_dc(LavfSnowContext *s, int mb_x, int mb_y, int plane_index){
         for(y2= FFMAX(y, 0); y2<FFMIN(h, y+block_h); y2++){
             for(x2= FFMAX(x, 0); x2<FFMIN(w, x+block_w); x2++){
                 int index= x2-(block_w*mb_x - block_w/2) + (y2-(block_h*mb_y - block_h/2))*obmc_stride;
-                int obmc_v= obmc[index];
+                //int obmc_v= obmc[index];
                 int d;
-                if(y<0) obmc_v += obmc[index + block_h*obmc_stride];
+                /*if(y<0) obmc_v += obmc[index + block_h*obmc_stride];
                 if(x<0) obmc_v += obmc[index + block_w];
                 if(y+block_h>h) obmc_v += obmc[index - block_h*obmc_stride];
-                if(x+block_w>w) obmc_v += obmc[index - block_w];
+                if(x+block_w>w) obmc_v += obmc[index - block_w];*/
                 //FIXME precalculate this or simplify it somehow else
 
                 d = -dst[index] + (1<<(FRAC_BITS-1));
                 dst[index] = d;
-                ab += (src[x2 + y2*ref_stride] - (d>>FRAC_BITS)) * obmc_v;
-                aa += obmc_v * obmc_v; //FIXME precalculate this
+                //ab += (src[x2 + y2*ref_stride] - (d>>FRAC_BITS)) * obmc_v;
+                //aa += obmc_v * obmc_v; //FIXME precalculate this
             }
         }
     }
     *b= backup;
 
-    return av_clip_uint8( ROUNDED_DIV(ab<<LOG2_OBMC_MAX, aa) ); //FIXME we should not need clipping
+    //return av_clip_uint8( ROUNDED_DIV(ab<<LOG2_OBMC_MAX, aa) ); //FIXME we should not need clipping
 }
 
 static inline int get_block_bits(LavfSnowContext *s, int x, int y, int w){
@@ -1063,18 +1063,19 @@ static inline int get_block_bits(LavfSnowContext *s, int x, int y, int w){
 */
 //FIXME try accurate rate
 //FIXME intra and inter predictors if surrounding blocks are not the same type
-    if(b->type & BLOCK_INTRA){
+    av_assert0(!(b->type & BLOCK_INTRA));
+    /*if(b->type & BLOCK_INTRA){
         return 3+2*( av_log2(2*FFABS(left->color[0] - b->color[0]))
                    + av_log2(2*FFABS(left->color[1] - b->color[1]))
                    + av_log2(2*FFABS(left->color[2] - b->color[2])));
-    }else{
+    }else{*/
         pred_mv(s, &dmx, &dmy, b->ref, left, top, tr);
         dmx-= b->mx;
         dmy-= b->my;
         return 2*(1 + av_log2(2*FFABS(dmx)) //FIXME kill the 2* can be merged in lambda
                     + av_log2(2*FFABS(dmy))
                     + av_log2(2*b->ref));
-    }
+    //}
 }
 
 static int get_block_rd(LavfSnowContext *s, int mb_x, int mb_y, int plane_index, uint8_t (*obmc_edged)[MB_SIZE * 2]){
@@ -1175,6 +1176,7 @@ static int get_block_rd(LavfSnowContext *s, int mb_x, int mb_y, int plane_index,
         if(mb_x == b_stride-2)
             rate += get_block_bits(s, mb_x + 1, mb_y + 1, 1);
     }
+    //av_log(NULL, AV_LOG_ERROR, "distortion: %d\n", distortion);
     return distortion + rate*penalty_factor;
 }
 
@@ -1257,12 +1259,12 @@ static av_always_inline int check_block(LavfSnowContext *s, int mb_x, int mb_y, 
     av_assert2(mb_x>=0 && mb_y>=0);
     av_assert2(mb_x<b_stride);
 
-    if(intra){
+    /*if(intra){
         block->color[0] = p[0];
         block->color[1] = p[1];
         block->color[2] = p[2];
         block->type |= BLOCK_INTRA;
-    }else{
+    }else{*/
         index= (p[0] + 31*p[1]) & (ME_CACHE_SIZE-1);
         value= s->me_cache_generation + (p[0]>>10) + (p[1]<<6) + (block->ref<<12);
         if(s->me_cache[index] == value)
@@ -1272,7 +1274,7 @@ static av_always_inline int check_block(LavfSnowContext *s, int mb_x, int mb_y, 
         block->mx= p[0];
         block->my= p[1];
         block->type &= ~BLOCK_INTRA;
-    }
+    //}
 
     rd= get_block_rd(s, mb_x, mb_y, 0, obmc_edged) + s->intra_penalty * !!intra;
 
@@ -1344,17 +1346,17 @@ static void iterative_me(LavfSnowContext *s){
     const int b_width = s->b_width  << s->block_max_depth;
     const int b_height= s->b_height << s->block_max_depth;
     const int b_stride= b_width;
-    int color[3];
+    //int color[3];
 
     {
         //RangeCoder r = s->c;
-        uint8_t state[sizeof(s->block_state)];
-        memcpy(state, s->block_state, sizeof(s->block_state));
+        //uint8_t state[sizeof(s->block_state)];
+        //memcpy(state, s->block_state, sizeof(s->block_state));
         for(mb_y= 0; mb_y<s->b_height; mb_y++)
             for(mb_x= 0; mb_x<s->b_width; mb_x++)
                 encode_q_branch(s, 0, mb_x, mb_y);
         //s->c = r;
-        memcpy(s->block_state, state, sizeof(s->block_state));
+        //memcpy(s->block_state, state, sizeof(s->block_state));
     }
 
     for(pass=0; pass<25; pass++){
@@ -1377,6 +1379,9 @@ static void iterative_me(LavfSnowContext *s){
                 LavfBlockNode *brb= mb_x+1<b_width && mb_y+1<b_height ? &s->block[index+b_stride+1] : NULL;
                 const int b_w= (MB_SIZE >> s->block_max_depth);
                 uint8_t obmc_edged[MB_SIZE * 2][MB_SIZE * 2];
+
+                //av_log(NULL, AV_LOG_ERROR, "%d, %d, pass=%d, key: %d\n", mb_x, mb_y, pass, s->keyframe);
+                av_assert0(!(block->type&BLOCK_INTRA)); //TODO remove
 
                 if(pass && (block->type & BLOCK_OPT))
                     continue;
@@ -1442,13 +1447,14 @@ static void iterative_me(LavfSnowContext *s){
 
                 // intra(black) = neighbors' contribution to the current block
                 for(i=0; i < s->nb_planes; i++)
-                    color[i]= get_dc(s, mb_x, mb_y, i);
+                    get_dc(s, mb_x, mb_y, i);//color[i]= get_dc(s, mb_x, mb_y, i);
+
 
                 // get previous score (cannot be cached due to OBMC)
-                if(pass > 0 && (block->type&BLOCK_INTRA)){
+                /*if(pass > 0 && (block->type&BLOCK_INTRA)){
                     int color0[3]= {block->color[0], block->color[1], block->color[2]};
                     check_block(s, mb_x, mb_y, color0, 1, obmc_edged, &best_rd);
-                }else
+                }else*/
                     check_block_inter(s, mb_x, mb_y, block->mx, block->my, obmc_edged, &best_rd);
 
                 ref_b= *block;
@@ -1506,9 +1512,10 @@ static void iterative_me(LavfSnowContext *s){
                 }
                 best_rd= ref_rd;
                 *block= ref_b;
-                check_block(s, mb_x, mb_y, color, 1, obmc_edged, &best_rd);
+                //check_block(s, mb_x, mb_y, color, 0, obmc_edged, &best_rd);
                 //FIXME RD style color selection
                 if(!same_block(block, &backup)){
+                    //av_assert0(0>0);
                     if(tb ) tb ->type &= ~BLOCK_OPT;
                     if(lb ) lb ->type &= ~BLOCK_OPT;
                     if(rb ) rb ->type &= ~BLOCK_OPT;
@@ -1782,9 +1789,8 @@ static int halfpel_interpol(LavfSnowContext *s, uint8_t *halfpel[4][4], AVFrame 
     return 0;
 }
 
-static void snow_release_buffer(AVCodecContext *avctx)
+static void snow_release_buffer(LavfSnowContext *s)
 {
-    LavfSnowContext *s = avctx->priv_data;
     int i;
 
     if(s->last_avframe[s->max_ref_frames-1]->data[0]){
@@ -1801,7 +1807,7 @@ static int snow_frame_start(LavfSnowContext *s){
     AVFrame *tmp;
     int i, ret;
 
-    snow_release_buffer(s->avctx);
+    snow_release_buffer(s);
 
     tmp = s->last_avframe[s->max_ref_frames-1];
     for(i=s->max_ref_frames-1; i>0; i--)
@@ -1842,9 +1848,10 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 }
 
 int lavfsnow_encode_frame(AVCodecContext *avctx,
-                        const AVFrame *pict, int *got_packet, int *flags)
+                        const AVFrame *pict, /*int *got_packet,*/ int *flags)
 {
     LavfSnowContext *s = avctx->priv_data;
+    //av_assert0(avctx==s->avctx);
     //RangeCoder * const c= &s->c;
     AVFrame *pic;
     const int width= s->avctx->width;
@@ -1974,7 +1981,7 @@ int lavfsnow_encode_frame(AVCodecContext *avctx,
     s->mpeg.pict_type = pic->pict_type;
     //s->qbias = pic->pict_type == AV_PICTURE_TYPE_P ? 2 : 0;
 
-    lavfsnow_common_init_after_header(avctx);
+    lavfsnow_common_init_after_header(s);
 
     /*if(s->last_spatial_decomposition_count != s->spatial_decomposition_count){
         for(plane_index=0; plane_index < s->nb_planes; plane_index++){
@@ -1983,8 +1990,8 @@ int lavfsnow_encode_frame(AVCodecContext *avctx,
     }*/
 
     //encode_header(s);
-    if(s->keyframe/* || s->always_reset*/) //from encode_header:
-        memset(s->block_state, MID_STATE, sizeof(s->block_state));//snow_reset_contexts(s);
+    //if(s->keyframe/* || s->always_reset*/) //from encode_header:
+        //memset(s->block_state, MID_STATE, sizeof(s->block_state));//snow_reset_contexts(s);
 
     //s->mpeg.misc_bits = 8*pkt->data;//(s->c.bytestream - s->c.bytestream_start);
     encode_blocks(s);
@@ -2011,7 +2018,7 @@ int lavfsnow_encode_frame(AVCodecContext *avctx,
 
     //update_last_header_values(s);
 
-    snow_release_buffer(avctx);
+    snow_release_buffer(s);
 
     s->current_avframe->coded_picture_number = avctx->frame_number;
     s->current_avframe->pict_type = pic->pict_type;
@@ -2037,7 +2044,7 @@ int lavfsnow_encode_frame(AVCodecContext *avctx,
     //pkt->size = ff_rac_terminate(c);
     if (s->current_avframe->key_frame)
         *flags |= AV_PKT_FLAG_KEY;
-    *got_packet = 1;
+    //*got_packet = 1;
 
     return 0;
 }

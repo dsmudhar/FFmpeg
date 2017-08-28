@@ -322,6 +322,7 @@ static void mc_block(LavfPlane *p, uint8_t *dst, const uint8_t *src, int stride,
 
 void lavfsnow_pred_block(LavfSnowContext *s, uint8_t *dst, uint8_t *tmp, ptrdiff_t stride, int sx, int sy, int b_w, int b_h, const LavfBlockNode *block, int plane_index, int w, int h){
     if(block->type & BLOCK_INTRA){
+        av_assert0(0>0);
         int x, y;
         const unsigned color  = block->color[plane_index];
         const unsigned color4 = color*0x01010101;
@@ -505,10 +506,10 @@ fail:
     return AVERROR(ENOMEM);
 }
 
-int lavfsnow_common_init_after_header(AVCodecContext *avctx) {
-    LavfSnowContext *s = avctx->priv_data;
+int lavfsnow_common_init_after_header(LavfSnowContext *s) {
     int plane_index;
     int ret, emu_buf_size;
+    AVCodecContext *avctx = s->avctx;
 
     if(!s->scratchbuf) {
         if ((ret = ff_get_buffer(s->avctx, s->mconly_avframe, AV_GET_BUFFER_FLAG_REF)) < 0)
