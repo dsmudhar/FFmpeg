@@ -338,8 +338,8 @@ static int encode_q_branch(SnowContext *s, int level, int x, int y){
         av_assert2(ref_my >= c->ymin);
         av_assert2(ref_my <= c->ymax);
 
-        ref_score= c->sub_motion_search(&s->m, &ref_mx, &ref_my, ref_score, 0, 0, level-LOG2_MB_SIZE+4, block_w);
-        ref_score= ff_get_mb_score(&s->m, ref_mx, ref_my, 0, 0, level-LOG2_MB_SIZE+4, block_w, 0);
+        ref_score= c->sub_motion_search(&s->m.me, &ref_mx, &ref_my, ref_score, 0, 0, level-LOG2_MB_SIZE+4, block_w);
+        ref_score= ff_get_mb_score(&s->m.me, ref_mx, ref_my, 0, 0, level-LOG2_MB_SIZE+4, block_w, 0);
         ref_score+= 2*av_log2(2*ref)*c->penalty_factor;
         if(s->ref_mvs[ref]){
             s->ref_mvs[ref][index][0]= ref_mx;
@@ -674,19 +674,19 @@ static int get_block_rd(SnowContext *s, int mb_x, int mb_y, int plane_index, uin
          * to improve the score of the whole frame, thus iterative motion
          * estimation does not always converge. */
         if(s->avctx->me_cmp == FF_CMP_W97)
-            distortion = ff_w97_32_c(&s->m, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, 32);
+            distortion = ff_w97_32_c(&s->m.me, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, 32);
         else if(s->avctx->me_cmp == FF_CMP_W53)
-            distortion = ff_w53_32_c(&s->m, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, 32);
+            distortion = ff_w53_32_c(&s->m.me, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, 32);
         else{
             distortion = 0;
             for(i=0; i<4; i++){
                 int off = sx+16*(i&1) + (sy+16*(i>>1))*ref_stride;
-                distortion += s->mecc.me_cmp[0](&s->m, src + off, dst + off, ref_stride, 16);
+                distortion += s->mecc.me_cmp[0](&s->m.me, src + off, dst + off, ref_stride, 16);
             }
         }
     }else{
         av_assert2(block_w==8);
-        distortion = s->mecc.me_cmp[0](&s->m, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, block_w*2);
+        distortion = s->mecc.me_cmp[0](&s->m.me, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, block_w*2);
     }
 
     if(plane_index==0){
@@ -750,7 +750,7 @@ static int get_4block_rd(SnowContext *s, int mb_x, int mb_y, int plane_index){
         }
 
         av_assert1(block_w== 8 || block_w==16);
-        distortion += s->mecc.me_cmp[block_w==8](&s->m, src + x + y*ref_stride, dst + x + y*ref_stride, ref_stride, block_h);
+        distortion += s->mecc.me_cmp[block_w==8](&s->m.me, src + x + y*ref_stride, dst + x + y*ref_stride, ref_stride, block_h);
     }
 
     if(plane_index==0){
@@ -1688,12 +1688,12 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
         s->m.qscale= (s->m.lambda*139 + FF_LAMBDA_SCALE*64) >> (FF_LAMBDA_SHIFT + 7);
         s->lambda2= s->m.lambda2= (s->m.lambda*s->m.lambda + FF_LAMBDA_SCALE/2) >> FF_LAMBDA_SHIFT;
 
-        s->m.mecc= s->mecc; //move
+        s->m.me.mec_ctx= s->mecc; //move
         s->m.qdsp= s->qdsp; //move
         s->m.hdsp = s->hdsp;
-        ff_init_me(&s->m);
+        ff_init_me(&s->m.me, &s->m);
         s->hdsp = s->m.hdsp;
-        s->mecc= s->m.mecc;
+        s->mecc= s->m.me.mec_ctx;
     }
 
     if(s->pass1_rc){

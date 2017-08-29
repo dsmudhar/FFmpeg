@@ -330,8 +330,8 @@ FF_ENABLE_DEPRECATION_WARNINGS
         s->m.current_picture.motion_val[0]   = s->motion_val8[plane] + 2;
         s->m.p_mv_table                      = s->motion_val16[plane] +
                                                s->m.mb_stride + 1;
-        s->m.mecc                            = s->mecc; // move
-        ff_init_me(&s->m);
+        s->m.me.mec_ctx                      = s->mecc; // move
+        ff_init_me(&s->m.me, &s->m);
 
         s->m.me.dia_size      = s->avctx->dia_size;
         s->m.first_slice_line = 1;

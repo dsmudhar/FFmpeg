@@ -39,13 +39,13 @@ extern uint32_t ff_square_tab[512];
  * !future video codecs might need functions with less strict alignment
  */
 
-struct MpegEncContext;
+struct MotionEstContext;
 /* Motion estimation:
  * h is limited to { width / 2, width, 2 * width },
  * but never larger than 16 and never smaller than 2.
  * Although currently h < 4 is not used as functions with
  * width < 8 are neither used nor implemented. */
-typedef int (*me_cmp_func)(struct MpegEncContext *c,
+typedef int (*me_cmp_func)(struct MotionEstContext *ctx,
                            uint8_t *blk1 /* align width (8 or 16) */,
                            uint8_t *blk2 /* align 1 */, ptrdiff_t stride,
                            int h);
@@ -77,6 +77,13 @@ typedef struct MECmpContext {
 
     me_cmp_func pix_abs[2][4];
     me_cmp_func median_sad[6];
+
+    /**
+     * noise vs. sse weight for the nsse comparison function
+     * - encoding: Set by user.
+     * - decoding: unused
+     */
+    int nsse_weight;
 } MECmpContext;
 
 void ff_me_cmp_init_static(void);
