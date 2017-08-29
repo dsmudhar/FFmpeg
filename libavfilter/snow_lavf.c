@@ -430,10 +430,12 @@ av_cold int lavfsnow_common_init(AVCodecContext *avctx){
 
     s->avctx= avctx;
     s->max_ref_frames=1; //just make sure it's not an invalid value in case of no initial keyframe
+    //s->spatial_decomposition_count = 1;
 
     ff_me_cmp_init(&s->mecc, avctx);
     ff_hpeldsp_init(&s->hdsp, avctx->flags);
     ff_videodsp_init(&s->vdsp, 8);
+    //ff_dwt_init(&s->dwt);
     ff_h264qpel_init(&s->h264qpel, 8);
 
 #define mcf(dx,dy)\
@@ -474,8 +476,16 @@ av_cold int lavfsnow_common_init(AVCodecContext *avctx){
     mcfh(0, 8)
     mcfh(8, 8)
 
+//    dec += FFMAX(s->chroma_h_shift, s->chroma_v_shift);
+
     width= s->avctx->width;
     height= s->avctx->height;
+
+    //FF_ALLOCZ_ARRAY_OR_GOTO(avctx, s->spatial_idwt_buffer, width, height * sizeof(short), fail);
+    //FF_ALLOCZ_ARRAY_OR_GOTO(avctx, s->spatial_dwt_buffer,  width, height * sizeof(int),  fail); //FIXME this does not belong here
+    //FF_ALLOCZ_ARRAY_OR_GOTO(avctx, s->temp_dwt_buffer,     width, sizeof(int),  fail);
+    //FF_ALLOCZ_ARRAY_OR_GOTO(avctx, s->temp_idwt_buffer,    width, sizeof(short), fail);
+    //FF_ALLOC_ARRAY_OR_GOTO(avctx,  s->run_buffer,          ((width + 1) >> 1), ((height + 1) >> 1) * sizeof(*s->run_buffer), fail);
 
     for(i=0; i<MAX_REF_FRAMES; i++) {
         for(j=0; j<MAX_REF_FRAMES; j++)
@@ -523,6 +533,42 @@ int lavfsnow_common_init_after_header(LavfSnowContext *s) {
         }
         s->plane[plane_index].width = w;
         s->plane[plane_index].height= h;
+
+        /*for(level=s->spatial_decomposition_count-1; level>=0; level--){
+            for(orientation=level ? 1 : 0; orientation<4; orientation++){
+                LavfSubBand *b= &s->plane[plane_index].band[level][orientation];
+
+                b->buf= s->spatial_dwt_buffer;
+                b->level= level;
+                b->stride= s->plane[plane_index].width << (s->spatial_decomposition_count - level);
+                b->width = (w + !(orientation&1))>>1;
+                b->height= (h + !(orientation>1))>>1;
+
+                b->stride_line = 1 << (s->spatial_decomposition_count - level);
+                b->buf_x_offset = 0;
+                b->buf_y_offset = 0;
+
+                if(orientation&1){
+                    b->buf += (w+1)>>1;
+                    b->buf_x_offset = (w+1)>>1;
+                }
+                if(orientation>1){
+                    b->buf += b->stride>>1;
+                    b->buf_y_offset = b->stride_line >> 1;
+                }
+                b->ibuf= s->spatial_idwt_buffer + (b->buf - s->spatial_dwt_buffer);
+
+                if(level)
+                    b->parent= &s->plane[plane_index].band[level-1][orientation];
+                //FIXME avoid this realloc
+                av_freep(&b->x_coeff);
+                b->x_coeff=av_mallocz_array(((b->width+1) * b->height+1), sizeof(lavf_x_and_coeff));
+                if (!b->x_coeff)
+                    goto fail;
+            }
+            w= (w+1)>>1;
+            h= (h+1)>>1;
+        }*/
     }
 
     return 0;
