@@ -327,6 +327,7 @@ static int encode_q_branch(SnowContext *s, int level, int x, int y){
 
     score= INT_MAX;
     best_ref= 0;
+    ff_epzs_copy_stuff(&s->m.me);
     for(ref=0; ref<s->ref_frames; ref++){
         init_ref(c, current_data, s->last_picture[ref]->data, NULL, block_w*x, block_w*y, 0);
 

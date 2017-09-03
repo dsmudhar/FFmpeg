@@ -43,6 +43,33 @@ struct MpegEncContext;
 #define FF_ME_XONE 2
 
 /**
+ * members of MpegEncContext needed in ME.
+ */
+typedef struct MpegMEStruct
+{
+    /* need in ff_epzs_motion_search() */
+    int mb_stride;             ///< mb_width+1 used for some arrays to allow simple addressing of left & top MBs without sig11
+    int mb_x, mb_y;
+    int end_mb_y;              ///< end   mb_y of this thread (so current thread should process start_mb_y <= row < end_mb_y)
+    int pict_type;             ///< AV_PICTURE_TYPE_I, AV_PICTURE_TYPE_P, AV_PICTURE_TYPE_B, ...
+    int first_slice_line;      ///< used in MPEG-4 too to handle resync markers
+    int mb_width, mb_height;   ///< number of MBs horizontally & vertically
+    int mpv_flags;             ///< flags set by private options
+
+    /* used in cmp_direct_inline() */
+    uint16_t pp_time;               ///< time distance between the last 2 p,s,i frames
+    uint16_t pb_time;               ///< time distance between the last b and p,s,i frame
+/*
+#define MV_TYPE_16X16       0   ///< 1 vector for the whole mb
+#define MV_TYPE_8X8         1   ///< 4 vectors (H.263, MPEG-4 4MV)
+#define MV_TYPE_16X8        2   ///< 2 vectors, one per 16x8 block
+#define MV_TYPE_FIELD       3   ///< 2 vectors, one per field
+#define MV_TYPE_DMV         4   ///< 2 vectors, special mpeg2 Dual Prime Vectors*/
+    int mv_type;
+    int width, height;          ///< picture size. must be a multiple of 16
+    /*int mb_x, mb_y;*/
+} MpegMEStruct;
+/**
  * Motion estimation context.
  */
 typedef struct MotionEstContext {
@@ -101,6 +128,7 @@ typedef struct MotionEstContext {
     /* AIATMIIOMPV */
     MECmpContext mec_ctx;
     struct MpegEncContext *mpeg_ctx;
+    MpegMEStruct mme_struct; ///< plan is - to copy required things from MpegEncContext, test everything, remove this.MpegEncContext, merge context and this struct;
 } MotionEstContext;
 
 static inline int ff_h263_round_chroma(int x)
@@ -121,7 +149,10 @@ void ff_estimate_b_frame_motion(struct MpegEncContext *s, int mb_x, int mb_y);
 int ff_pre_estimate_p_frame_motion(struct MpegEncContext *s,
                                    int mb_x, int mb_y);
 
-int ff_epzs_motion_search(struct MpegEncContext *s, int *mx_ptr, int *my_ptr,
+/* temporary function used to copy required stuff to mme, to test that it doesn't break things
+   temporary, until we find better location for members */
+void ff_epzs_copy_stuff(MotionEstContext *c);
+int ff_epzs_motion_search(MotionEstContext *c, int *mx_ptr, int *my_ptr,
                           int P[10][2], int src_index, int ref_index,
                           int16_t (*last_mv)[2], int ref_mv_scale, int size,
                           int h);

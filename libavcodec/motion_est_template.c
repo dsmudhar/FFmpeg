@@ -844,11 +844,13 @@ static av_always_inline int diamond_search(MotionEstContext * c, int *best, int 
    it takes fewer iterations. And it increases the chance that we find the
    optimal mv.
  */
-static av_always_inline int epzs_motion_search_internal(MpegEncContext * s, int *mx_ptr, int *my_ptr,
+static av_always_inline int epzs_motion_search_internal(MotionEstContext * c, int *mx_ptr, int *my_ptr,
                              int P[10][2], int src_index, int ref_index, int16_t (*last_mv)[2],
                              int ref_mv_scale, int flags, int size, int h)
 {
-    MotionEstContext * const c= &s->me;
+    MpegEncContext * mpeg_ctx = c->mpeg_ctx;
+    MpegMEStruct * s = &c->mme_struct;
+
     int best[2]={0, 0};      /**< x and y coordinates of the best motion vector.
                                i.e. the difference between the position of the
                                block currently being encoded and the position of
@@ -893,7 +895,8 @@ static av_always_inline int epzs_motion_search_internal(MpegEncContext * s, int 
         CHECK_CLIPPED_MV((last_mv[ref_mv_xy][0]*ref_mv_scale + (1<<15))>>16,
                         (last_mv[ref_mv_xy][1]*ref_mv_scale + (1<<15))>>16)
     }else{
-        if(dmin<((h*h*s->avctx->mv0_threshold)>>8)
+        av_assert0(mpeg_ctx->avctx == c->avctx); //TODO remove
+        if(dmin<((h*h * c->avctx->mv0_threshold)>>8)
                     && ( P_LEFT[0]    |P_LEFT[1]
                         |P_TOP[0]     |P_TOP[1]
                         |P_TOPRIGHT[0]|P_TOPRIGHT[1])==0){
@@ -902,7 +905,7 @@ static av_always_inline int epzs_motion_search_internal(MpegEncContext * s, int 
             c->skip=1;
             return dmin;
         }
-        CHECK_MV(    P_MEDIAN[0] >>shift ,    P_MEDIAN[1] >>shift)
+        CHECK_MV(P_MEDIAN[0] >>shift ,    P_MEDIAN[1] >>shift)
         CHECK_CLIPPED_MV((P_MEDIAN[0]>>shift)  , (P_MEDIAN[1]>>shift)-1)
         CHECK_CLIPPED_MV((P_MEDIAN[0]>>shift)  , (P_MEDIAN[1]>>shift)+1)
         CHECK_CLIPPED_MV((P_MEDIAN[0]>>shift)-1, (P_MEDIAN[1]>>shift)  )
@@ -960,20 +963,38 @@ static av_always_inline int epzs_motion_search_internal(MpegEncContext * s, int 
     return dmin;
 }
 
+/* temporary function used to copy required stuff to mme, to test that it doesn't break things
+   temporary, until we find better location for members
+   this fxn is called before ff_epzs_motion_search()
+   see MpegMEStruct */
+void ff_epzs_copy_stuff(MotionEstContext *c) {
+    MpegMEStruct * mme_struct = &c->mme_struct;
+    MpegEncContext * s = c->mpeg_ctx;
+
+    mme_struct->mb_stride = s->mb_stride;
+    mme_struct->mb_x = s->mb_x;
+    mme_struct->mb_y = s->mb_y;
+    mme_struct->end_mb_y = s->end_mb_y;
+    mme_struct->pict_type = s->pict_type;
+    mme_struct->first_slice_line = s->first_slice_line;
+    mme_struct->mb_width = s->mb_width;
+    mme_struct->mb_height = s->mb_height;
+    mme_struct->mpv_flags = s->mpv_flags;
+}
+
 //this function is dedicated to the brain damaged gcc
-int ff_epzs_motion_search(MpegEncContext *s, int *mx_ptr, int *my_ptr,
+int ff_epzs_motion_search(MotionEstContext *c, int *mx_ptr, int *my_ptr,
                           int P[10][2], int src_index, int ref_index,
                           int16_t (*last_mv)[2], int ref_mv_scale,
                           int size, int h)
 {
-    MotionEstContext * const c= &s->me;
 //FIXME convert other functions in the same way if faster
     if(c->flags==0 && h==16 && size==0){
-        return epzs_motion_search_internal(s, mx_ptr, my_ptr, P, src_index, ref_index, last_mv, ref_mv_scale, 0, 0, 16);
+        return epzs_motion_search_internal(c, mx_ptr, my_ptr, P, src_index, ref_index, last_mv, ref_mv_scale, 0, 0, 16);
 //    case FLAG_QPEL:
 //        return epzs_motion_search_internal(s, mx_ptr, my_ptr, P, src_index, ref_index, last_mv, ref_mv_scale, FLAG_QPEL);
     }else{
-        return epzs_motion_search_internal(s, mx_ptr, my_ptr, P, src_index, ref_index, last_mv, ref_mv_scale, c->flags, size, h);
+        return epzs_motion_search_internal(c, mx_ptr, my_ptr, P, src_index, ref_index, last_mv, ref_mv_scale, c->flags, size, h);
     }
 }
 

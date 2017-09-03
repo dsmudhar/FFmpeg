@@ -138,7 +138,7 @@ typedef struct LavfSnowContext {
     AVFrame *input_avframe;              ///< new_picture with the internal linesizes
     AVFrame *current_avframe;
     AVFrame *last_avframe[MAX_REF_FRAMES];
-    uint8_t *halfpel_plane[MAX_REF_FRAMES][4][4];
+    //uint8_t *halfpel_plane[MAX_REF_FRAMES][4][4];
     AVFrame *mconly_avframe;
 //     uint8_t q_context[16];
     //uint8_t header_state[32];
@@ -203,6 +203,7 @@ typedef struct LavfSnowContext {
     //uint64_t encoding_error[AV_NUM_DATA_POINTERS];
 
     //int pred;
+    uint8_t *obmc_scratchpad;
 } LavfSnowContext;
 
 int lavfsnow_common_init(AVCodecContext *avctx);

@@ -579,9 +579,8 @@ fail:
 int lavfsnow_get_mvs(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int w, int h)
 {
     LavfSnowContext *s = avctx->priv_data;
-    const int b_width  = s->b_width  << s->block_max_depth;
-    const int b_height = s->b_height << s->block_max_depth;
-    const int b_stride= b_width;
+    const int b_width  = s->b_width ;// << s->block_max_depth;
+    const int b_height = s->b_height;// << s->block_max_depth;
     int x, y;
 
     if (w != b_width || h != b_height) {
@@ -592,7 +591,9 @@ int lavfsnow_get_mvs(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int
 
     for (y=0; y<h; y++) {
         for (x=0; x<w; x++) {
-            LavfBlockNode *bn= &s->block[x + y*b_stride];
+            LavfBlockNode *bn= &s->block[x + y*b_width];
+            if (s->block_max_depth)
+                bn = &s->block[2*x + 2*y*(b_width<<s->block_max_depth)];
             if (bn->type) {
                 refs[x + y*w] = -1;
             } else {

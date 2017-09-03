@@ -107,8 +107,8 @@ static int get_flags(MotionEstContext *c, int direct, int chroma){
 static av_always_inline int cmp_direct_inline(MotionEstContext *c, const int x, const int y, const int subx, const int suby,
                       const int size, const int h, int ref_index, int src_index,
                       me_cmp_func cmp_func, me_cmp_func chroma_cmp_func, int qpel){
-    //MotionEstContext * const c= &s->me;
-    MpegEncContext *s = c->mpeg_ctx;
+    //MpegEncContext *s = c->mpeg_ctx;
+    MpegMEStruct * s = &c->mme_struct; av_assert0(0>0); //TODO remove
     const int stride= c->stride;
     const int hx= subx + (x<<(1+qpel));
     const int hy= suby + (y<<(1+qpel));
@@ -978,7 +978,8 @@ void ff_estimate_p_frame_motion(MpegEncContext * s,
             c->pred_x = P_LEFT[0];
             c->pred_y = P_LEFT[1];
         }
-        dmin = ff_epzs_motion_search(s, &mx, &my, P, 0, 0, s->p_mv_table, (1<<16)>>shift, 0, 16);
+        ff_epzs_copy_stuff(c);
+        dmin = ff_epzs_motion_search(c, &mx, &my, P, 0, 0, s->p_mv_table, (1<<16)>>shift, 0, 16);
     }
 
     /* At this point (mx,my) are full-pell and the relative displacement */
@@ -1126,7 +1127,8 @@ int ff_pre_estimate_p_frame_motion(MpegEncContext * s,
         c->pred_y = P_MEDIAN[1];
     }
 
-    dmin = ff_epzs_motion_search(s, &mx, &my, P, 0, 0, s->p_mv_table, (1<<16)>>shift, 0, 16);
+    ff_epzs_copy_stuff(c);
+    dmin = ff_epzs_motion_search(c, &mx, &my, P, 0, 0, s->p_mv_table, (1<<16)>>shift, 0, 16);
 
     s->p_mv_table[xy][0] = mx<<shift;
     s->p_mv_table[xy][1] = my<<shift;
@@ -1181,7 +1183,8 @@ static int estimate_motion_b(MpegEncContext *s, int mb_x, int mb_y,
             mv_scale= ((s->pb_time - s->pp_time)<<16) / (s->pp_time<<shift);
         }
 
-        dmin = ff_epzs_motion_search(s, &mx, &my, P, 0, ref_index, s->p_mv_table, mv_scale, 0, 16);
+        ff_epzs_copy_stuff(c);
+        dmin = ff_epzs_motion_search(c, &mx, &my, P, 0, ref_index, s->p_mv_table, mv_scale, 0, 16);
     }
 
     dmin= c->sub_motion_search(c, &mx, &my, dmin, 0, ref_index, 0, 16);
@@ -1491,7 +1494,8 @@ static inline int direct_search(MpegEncContext * s, int mb_x, int mb_y)
         P_MEDIAN[1]= mid_pred(P_LEFT[1], P_TOP[1], P_TOPRIGHT[1]);
     }
 
-    dmin = ff_epzs_motion_search(s, &mx, &my, P, 0, 0, mv_table, 1<<(16-shift), 0, 16);
+    ff_epzs_copy_stuff(c);
+    dmin = ff_epzs_motion_search(c, &mx, &my, P, 0, 0, mv_table, 1<<(16-shift), 0, 16);
     if(c->sub_flags&FLAG_QPEL)
         dmin = qpel_motion_search(c, &mx, &my, dmin, 0, 0, 0, 16);
     else
