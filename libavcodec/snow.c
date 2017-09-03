@@ -732,9 +732,9 @@ av_cold void ff_snow_common_end(SnowContext *s)
     av_frame_free(&s->current_picture);
 }
 
-int ff_get_mvs_snow(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int w, int h)
+int avpriv_get_mvs_snow(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int w, int h)
 {
-    SnowContext *s = avctx->priv_data;
+    /*SnowContext *s = avctx->priv_data;
     const int b_width  = s->b_width  << s->block_max_depth;
     const int b_height = s->b_height << s->block_max_depth;
     const int b_stride= b_width;
@@ -759,5 +759,33 @@ int ff_get_mvs_snow(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int 
         }
     }
 
+    return 0;*/
+
+
+    SnowContext *s = avctx->priv_data;
+    const int b_width  = s->b_width ;// << s->block_max_depth;
+    const int b_height = s->b_height;// << s->block_max_depth;
+    int x, y;
+
+    if (w != b_width || h != b_height) {
+        av_log(avctx, AV_LOG_ERROR, "mvs array dimensions mismatch %dx%d != %dx%d\n",
+               w, h, b_width, b_height);
+        return AVERROR(EINVAL);
+    }
+
+    for (y=0; y<h; y++) {
+        for (x=0; x<w; x++) {
+            BlockNode *bn= &s->block[x + y*b_width];
+            if (s->block_max_depth)
+                bn = &s->block[2*x + 2*y*(b_width<<s->block_max_depth)];
+            if (bn->type) {
+                refs[x + y*w] = -1;
+            } else {
+                refs[x + y*w] = bn->ref;
+                mvs[x + y*w][0] = bn->mx;
+                mvs[x + y*w][1] = bn->my;
+            }
+        }
+    }
     return 0;
 }

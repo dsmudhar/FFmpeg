@@ -706,4 +706,6 @@ static inline void unpack_coeffs(SnowContext *s, SubBand *b, SubBand * parent, i
     (xc++)->x= w+1; //end marker
 }
 
+int avpriv_get_mvs_snow(AVCodecContext *avctx, int16_t (*mvs)[2], int8_t *refs, int w, int h);
+
 #endif /* AVCODEC_SNOW_H */

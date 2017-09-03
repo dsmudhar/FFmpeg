@@ -330,7 +330,7 @@ static int encode_q_branch(SnowContext *s, int level, int x, int y){
     for(ref=0; ref<s->ref_frames; ref++){
         init_ref(c, current_data, s->last_picture[ref]->data, NULL, block_w*x, block_w*y, 0);
 
-        ref_score= ff_epzs_motion_search(&s->m, &ref_mx, &ref_my, P, 0, /*ref_index*/ 0, last_mv,
+        ref_score= ff_epzs_motion_search(&s->m.me, &ref_mx, &ref_my, P, 0, /*ref_index*/ 0, last_mv,
                                          (1<<16)>>shift, level-LOG2_MB_SIZE+4, block_w);
 
         av_assert2(ref_mx >= c->xmin);
