@@ -241,6 +241,7 @@ static void register_all(void)
     REGISTER_FILTER(MASKEDCLAMP,    maskedclamp,    vf);
     REGISTER_FILTER(MASKEDMERGE,    maskedmerge,    vf);
     REGISTER_FILTER(MCDEINT,        mcdeint,        vf);
+    REGISTER_FILTER(MCFPS,          mcfps,          vf);
     REGISTER_FILTER(MERGEPLANES,    mergeplanes,    vf);
     REGISTER_FILTER(MESTIMATE,      mestimate,      vf);
     REGISTER_FILTER(METADATA,       metadata,       vf);
