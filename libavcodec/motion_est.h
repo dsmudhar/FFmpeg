@@ -142,6 +142,7 @@ static inline int ff_h263_round_chroma(int x)
 }
 
 int ff_init_me(MotionEstContext *mest_ctx, struct MpegEncContext *s);
+int ff_init_me2(MotionEstContext *c, HpelDSPContext *hdsp, QpelDSPContext *qdsp, int linesize, int uvlinesize, int no_rounding, int mb_size);
 
 void ff_estimate_p_frame_motion(struct MpegEncContext *s, int mb_x, int mb_y);
 void ff_estimate_b_frame_motion(struct MpegEncContext *s, int mb_x, int mb_y);

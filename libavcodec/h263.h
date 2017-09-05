@@ -75,7 +75,7 @@ void ff_h263_encode_mba(MpegEncContext *s);
 void ff_init_qscale_tab(MpegEncContext *s);
 int ff_h263_pred_dc(MpegEncContext * s, int n, int16_t **dc_val_ptr);
 void ff_h263_pred_acdc(MpegEncContext * s, int16_t *block, int n);
-
+av_cold uint8_t **ff_h263_init_mv_penalty_and_fcode(void);
 
 /**
  * Print picture info if FF_DEBUG_PICT_INFO is set.

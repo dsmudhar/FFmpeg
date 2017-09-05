@@ -53,7 +53,7 @@
 #include "libavcodec/mpegvideo.h"
 #include "libavcodec/h263.h"
 
-#define FF_ME_ITER 50
+#define FF_ME_ITER 3
 
 FF_DISABLE_DEPRECATION_WARNINGS
 
@@ -242,7 +242,7 @@ static av_cold int encode_init2(AVCodecContext *avctx, LavfSnowContext *s)
 {
     int plane_index, ret;
     int i;
-    MotionEstContext *mest_ctx = &s->mpeg.me;
+    MotionEstContext *mest_ctx = &s->mest_ctx;
 
 /*#if FF_API_PRIVATE_OPT
     if (avctx->prediction_method)
@@ -280,7 +280,7 @@ static av_cold int encode_init2(AVCodecContext *avctx, LavfSnowContext *s)
 
     //s->version=0;
 
-    s->mpeg.avctx   = avctx;
+    //s->mpeg.avctx   = avctx;
     //s->mpeg.bit_rate= avctx->bit_rate;
 
     mest_ctx->temp      =
@@ -291,7 +291,8 @@ static av_cold int encode_init2(AVCodecContext *avctx, LavfSnowContext *s)
     if (!mest_ctx->scratchpad || !mest_ctx->map || !mest_ctx->score_map || !s->obmc_scratchpad)
         return AVERROR(ENOMEM);
 
-    ff_h263_encode_init(&s->mpeg); //mv_penalty
+    //ff_h263_encode_init(&s->mpeg); //mv_penalty
+    mest_ctx->mv_penalty = ff_h263_init_mv_penalty_and_fcode();
 
     s->max_ref_frames = av_clip(avctx->refs, 1, MAX_REF_FRAMES);
 
@@ -754,7 +755,7 @@ static int encode_q_branch(LavfSnowContext *s, int level, int x, int y){
     int16_t last_mv[3][2];
     int qpel= !!(s->avctx->flags & AV_CODEC_FLAG_QPEL); //unused
     const int shift= 1+qpel;
-    MotionEstContext *mest_ctx= &s->mpeg.me;
+    MotionEstContext *mest_ctx= &s->mest_ctx;
     /*int ref_context= av_log2(2*left->ref) + av_log2(2*top->ref);*/
     /*int mx_context= av_log2(2*FFABS(left->mx - top->mx));*/
     /*int my_context= av_log2(2*FFABS(left->my - top->my));*/
@@ -1181,12 +1182,12 @@ static int get_block_rd(LavfSnowContext *s, int mb_x, int mb_y, int plane_index,
         distortion = 0;
         for(i=0; i<4; i++){
             int off = sx+16*(i&1) + (sy+16*(i>>1))*ref_stride;
-            distortion += s->mecc.me_cmp[0](&s->mpeg.me, src + off, dst + off, ref_stride, 16);
+            distortion += s->mecc.me_cmp[0](&s->mest_ctx, src + off, dst + off, ref_stride, 16);
         }
         /*}*/
     }else{
         av_assert2(block_w==8);
-        distortion = s->mecc.me_cmp[0](&s->mpeg.me, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, block_w*2);
+        distortion = s->mecc.me_cmp[0](&s->mest_ctx, src + sx + sy*ref_stride, dst + sx + sy*ref_stride, ref_stride, block_w*2);
     }
 
     if(plane_index==0){
@@ -1251,7 +1252,7 @@ static int get_4block_rd(LavfSnowContext *s, int mb_x, int mb_y, int plane_index
         }
 
         av_assert1(block_w== 8 || block_w==16);
-        distortion += s->mecc.me_cmp[block_w==8](&s->mpeg.me, src + x + y*ref_stride, dst + x + y*ref_stride, ref_stride, block_h);
+        distortion += s->mecc.me_cmp[block_w==8](&s->mest_ctx, src + x + y*ref_stride, dst + x + y*ref_stride, ref_stride, block_h);
     }
 
     if(plane_index==0){
@@ -1876,7 +1877,7 @@ static int encode_frame(AVCodecContext *avctx, AVPacket *pkt,
 int lavfsnow_encode_frame(AVCodecContext *avctx, const AVFrame *avframe, /*int *got_packet,*/ int *flags)
 {
     LavfSnowContext *s = avctx->priv_data;
-    MotionEstContext *mest_ctx = &s->mpeg.me;
+    MotionEstContext *mest_ctx = &s->mest_ctx;
     //av_assert0(avctx==s->avctx);
     //RangeCoder * const c= &s->c;
     AVFrame *pic;
@@ -1947,12 +1948,12 @@ int lavfsnow_encode_frame(AVCodecContext *avctx, const AVFrame *avframe, /*int *
     if(pic->pict_type == AV_PICTURE_TYPE_P){
         int block_width = (width +15)>>4;
         int block_height= (height+15)>>4;
-        int stride= s->current_avframe->linesize[0];
+        //int stride= s->current_avframe->linesize[0];
 
         av_assert0(s->current_avframe->data[0]);
         av_assert0(s->last_avframe[0]->data[0]);
 
-        s->mpeg.avctx = s->avctx;
+        //s->mpeg.avctx = s->avctx;
         /*s->mpeg.last_picture.f = s->last_avframe[0];
         s->mpeg.new_picture.f = s->input_avframe;
         s->mpeg.last_picture_ptr = &s->mpeg.last_picture;*/
@@ -1971,10 +1972,10 @@ int lavfsnow_encode_frame(AVCodecContext *avctx, const AVFrame *avframe, /*int *
         //s->mpeg.b8_stride = 2*s->mpeg.mb_width+1;
         //s->mpeg.f_code=1;
         //mest_ctx->mme_struct.pict_type = pic->pict_type;
-#if FF_API_MOTION_EST
+/*#if FF_API_MOTION_EST
         //s->mpeg.me_method = s->avctx->me_method; //needed in ff_init_me;
-#endif
-        s->mpeg.motion_est = s->motion_est; //needed in ff_init_me;
+#endif*/
+        //s->mpeg.motion_est = s->motion_est; //needed in ff_init_me;
         //mest_ctx->scene_change_score = 0;
         mest_ctx->dia_size = avctx->dia_size;
         //s->mpeg.quarter_sample = (s->avctx->flags & AV_CODEC_FLAG_QPEL) != 0;
@@ -1986,19 +1987,21 @@ int lavfsnow_encode_frame(AVCodecContext *avctx, const AVFrame *avframe, /*int *
         s->lambda2 = /*s->mpeg.lambda2 =*/ (s->lambda*s->lambda + FF_LAMBDA_SCALE/2) >> FF_LAMBDA_SHIFT;
 
         mest_ctx->mec_ctx = s->mecc; //move
-        s->mpeg.qdsp = s->qdsp; //move //needed in ff_init_me;
-        s->mpeg.hdsp = s->hdsp; //needed in ff_init_me;
-        ff_init_me(mest_ctx, &s->mpeg);
-        s->hdsp = s->mpeg.hdsp;
+        //s->mpeg.qdsp = s->qdsp; //move //needed in ff_init_me;
+        //s->mpeg.hdsp = s->hdsp; //needed in ff_init_me;
+        mest_ctx->avctx = avctx;
+        //ff_init_me(mest_ctx, &s->mpeg);
+        ff_init_me2(mest_ctx, &s->hdsp, &s->qdsp, s->current_avframe->linesize[0], s->current_avframe->linesize[1], 0, block_width);
+        //s->hdsp = s->mpeg.hdsp;
         s->mecc = mest_ctx->mec_ctx;
         /* from ff_init_me: */ //TODO merge,remove
-        if(stride){
+        /*if(stride){
             mest_ctx->stride  = stride;
             mest_ctx->uvstride= s->current_avframe->linesize[1];
         }else{
             mest_ctx->stride  = 16*block_width + 32;
             mest_ctx->uvstride=  8*block_width + 16;
-        }
+        }*/
     }
 
     /*if(s->pass1_rc){
@@ -2094,7 +2097,7 @@ static av_cold void lavfsnow_common_end(LavfSnowContext *s)
 {
     //int plane_index, level, orientation, i;
     int i;
-    MotionEstContext *mest_ctx = &s->mpeg.me;
+    MotionEstContext *mest_ctx = &s->mest_ctx;
 
     //av_freep(&s->spatial_dwt_buffer);
     //av_freep(&s->temp_dwt_buffer);
@@ -2150,8 +2153,12 @@ FF_ENABLE_DEPRECATION_WARNINGS
 #define OFFSET(x) offsetof(LavfSnowContext, x)
 #define VE AV_OPT_FLAG_VIDEO_PARAM | AV_OPT_FLAG_ENCODING_PARAM
 static const AVOption options[] = {
-    FF_MPV_COMMON_OPTS
-    { "iter",           NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_ME_ITER }, 0, 0, FF_MPV_OPT_FLAGS, "motion_est" },
+    //FF_MPV_COMMON_OPTS
+    /*{"motion_est", "motion estimation algorithm", OFFSET(motion_est), AV_OPT_TYPE_INT, {.i64 = FF_ME_EPZS }, FF_ME_ZERO, FF_ME_ITER, VE, "motion_est" },
+    { "zero", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_ME_ZERO }, 0, 0, VE, "motion_est" },
+    { "epzs", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_ME_EPZS }, 0, 0, VE, "motion_est" },
+    { "xone", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_ME_XONE }, 0, 0, VE, "motion_est" },
+    { "iter", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_ME_ITER }, 0, 0, VE, "motion_est" },*/
     //{ "memc_only",      "Only do ME/MC (I frames -> ref, P frame -> ME+MC).",   OFFSET(memc_only), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     //{ "no_bitstream",   "Skip final bitstream writeout.",                    OFFSET(no_bitstream), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     { "intra_penalty",       "Penalty for intra blocks in block decission",      OFFSET(intra_penalty), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, VE },

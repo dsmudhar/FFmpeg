@@ -671,7 +671,7 @@ void ff_h263_encode_motion(PutBitContext *pb, int val, int f_code)
     }
 }
 
-static av_cold void init_mv_penalty_and_fcode(MpegEncContext *s)
+static av_cold void init_mv_penalty_and_fcode()
 {
     int f_code;
     int mv;
@@ -758,6 +758,11 @@ static av_cold void init_uni_h263_rl_tab(RLTable *rl, uint32_t *bits_tab,
     }
 }
 
+av_cold uint8_t **ff_h263_init_mv_penalty_and_fcode() {
+    init_mv_penalty_and_fcode();
+    return mv_penalty;
+}
+
 av_cold void ff_h263_encode_init(MpegEncContext *s)
 {
     static int done = 0;
@@ -771,7 +776,7 @@ av_cold void ff_h263_encode_init(MpegEncContext *s)
         init_uni_h263_rl_tab(&ff_rl_intra_aic, NULL, uni_h263_intra_aic_rl_len);
         init_uni_h263_rl_tab(&ff_h263_rl_inter    , NULL, uni_h263_inter_rl_len);
 
-        init_mv_penalty_and_fcode(s);
+        init_mv_penalty_and_fcode();
     }
     s->me.mv_penalty= mv_penalty; // FIXME exact table for MSMPEG4 & H.263+
 

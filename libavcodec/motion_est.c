@@ -406,6 +406,64 @@ FF_ENABLE_DEPRECATION_WARNINGS
     return 0;
 }
 
+//init for snow, Mpeg independent, temp
+int ff_init_me2(MotionEstContext *c, HpelDSPContext *hdsp, QpelDSPContext *qdsp, int linesize, int uvlinesize, int no_rounding, int mb_width) {
+    int cache_size= FFMIN(ME_MAP_SIZE>>ME_MAP_SHIFT, 1<<ME_MAP_SHIFT);
+    int dia_size= FFMAX(FFABS(c->avctx->dia_size)&255, FFABS(c->avctx->pre_dia_size)&255);
+
+    if(FFMIN(c->avctx->dia_size, c->avctx->pre_dia_size) < -FFMIN(ME_MAP_SIZE, MAX_SAB_SIZE)){
+        av_log(c->avctx, AV_LOG_ERROR, "ME_MAP size is too small for SAB diamond\n");
+        return -1;
+    }
+
+    if(cache_size < 2*dia_size && !c->stride){
+        av_log(c->avctx, AV_LOG_INFO, "ME_MAP size may be a little small for the selected diamond size\n");
+    }
+
+    ff_set_cmp(&c->mec_ctx, c->mec_ctx.me_pre_cmp, c->avctx->me_pre_cmp);
+    ff_set_cmp(&c->mec_ctx, c->mec_ctx.me_cmp,     c->avctx->me_cmp);
+    ff_set_cmp(&c->mec_ctx, c->mec_ctx.me_sub_cmp, c->avctx->me_sub_cmp);
+    ff_set_cmp(&c->mec_ctx, c->mec_ctx.mb_cmp,     c->avctx->mb_cmp);
+
+    c->flags    = get_flags(c, 0, c->avctx->me_cmp    &FF_CMP_CHROMA);
+    c->sub_flags= get_flags(c, 0, c->avctx->me_sub_cmp&FF_CMP_CHROMA);
+    c->mb_flags = get_flags(c, 0, c->avctx->mb_cmp    &FF_CMP_CHROMA);
+
+/*FIXME s->no_rounding b_type*/
+    if (c->avctx->flags & AV_CODEC_FLAG_QPEL) {
+        c->sub_motion_search= qpel_motion_search;
+        c->qpel_avg = qdsp->avg_qpel_pixels_tab;
+        if (no_rounding)
+            c->qpel_put = qdsp->put_no_rnd_qpel_pixels_tab;
+        else
+            c->qpel_put = qdsp->put_qpel_pixels_tab;
+    }else{
+        if(c->avctx->me_sub_cmp&FF_CMP_CHROMA)
+            c->sub_motion_search= hpel_motion_search;
+        else if(   c->avctx->me_sub_cmp == FF_CMP_SAD
+                && c->avctx->    me_cmp == FF_CMP_SAD
+                && c->avctx->    mb_cmp == FF_CMP_SAD)
+            c->sub_motion_search= sad_hpel_motion_search; // 2050 vs. 2450 cycles
+        else
+            c->sub_motion_search= hpel_motion_search;
+    }
+    c->hpel_avg = hdsp->avg_pixels_tab;
+    if (no_rounding)
+        c->hpel_put = hdsp->put_no_rnd_pixels_tab;
+    else
+        c->hpel_put = hdsp->put_pixels_tab;
+
+    if(linesize){
+        c->stride  = linesize;
+        c->uvstride= uvlinesize;
+    }else{
+        c->stride  = 16*mb_width + 32;
+        c->uvstride=  8*mb_width + 16;
+    }
+
+    return 0;
+}
+
 #define CHECK_SAD_HALF_MV(suffix, x, y) \
 {\
     d  = c->mec_ctx.pix_abs[size][(x ? 1 : 0) + (y ? 2 : 0)](NULL, pix, ptr + ((x) >> 1), stride, h); \

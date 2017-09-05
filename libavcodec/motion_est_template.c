@@ -895,7 +895,8 @@ static av_always_inline int epzs_motion_search_internal(MotionEstContext * c, in
         CHECK_CLIPPED_MV((last_mv[ref_mv_xy][0]*ref_mv_scale + (1<<15))>>16,
                         (last_mv[ref_mv_xy][1]*ref_mv_scale + (1<<15))>>16)
     }else{
-        av_assert0(mpeg_ctx->avctx == c->avctx); //TODO remove
+        if (mpeg_ctx)
+            av_assert0(mpeg_ctx->avctx == c->avctx); //TODO remove
         if(dmin<((h*h * c->avctx->mv0_threshold)>>8)
                     && ( P_LEFT[0]    |P_LEFT[1]
                         |P_TOP[0]     |P_TOP[1]
