@@ -68,6 +68,8 @@ typedef struct MpegMEStruct
     int mv_type;
     int width, height;          ///< picture size. must be a multiple of 16
     /*int mb_x, mb_y;*/
+
+    int direct_inline; ///< used to confirm cmp_direct_inline vars has been set.
 } MpegMEStruct;
 /**
  * Motion estimation context.

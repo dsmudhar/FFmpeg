@@ -108,7 +108,7 @@ static av_always_inline int cmp_direct_inline(MotionEstContext *c, const int x, 
                       const int size, const int h, int ref_index, int src_index,
                       me_cmp_func cmp_func, me_cmp_func chroma_cmp_func, int qpel){
     //MpegEncContext *s = c->mpeg_ctx;
-    MpegMEStruct * s = &c->mme_struct; av_assert0(0>0); //TODO remove
+    MpegMEStruct * s = &c->mme_struct; av_assert0(s->direct_inline); //TODO remove
     const int stride= c->stride;
     const int hx= subx + (x<<(1+qpel));
     const int hy= suby + (y<<(1+qpel));
@@ -1553,6 +1553,8 @@ static inline int direct_search(MpegEncContext * s, int mb_x, int mb_y)
     }
 
     ff_epzs_copy_stuff(c);
+    epzs_copy_stuff2(c);
+    c->mme_struct.direct_inline = 1; //test
     dmin = ff_epzs_motion_search(c, &mx, &my, P, 0, 0, mv_table, 1<<(16-shift), 0, 16);
     if(c->sub_flags&FLAG_QPEL)
         dmin = qpel_motion_search(c, &mx, &my, dmin, 0, 0, 0, 16);
@@ -1568,6 +1570,7 @@ static inline int direct_search(MpegEncContext * s, int mb_x, int mb_y)
     mv_table[mot_xy][1]= my;
     c->flags     &= ~FLAG_DIRECT;
     c->sub_flags &= ~FLAG_DIRECT;
+    c->mme_struct.direct_inline = 0; //TODO remove
 
     return dmin;
 }

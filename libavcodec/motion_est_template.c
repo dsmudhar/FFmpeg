@@ -983,6 +983,18 @@ void ff_epzs_copy_stuff(MotionEstContext *c) {
     mme_struct->mpv_flags = s->mpv_flags;
 }
 
+static void epzs_copy_stuff2(MotionEstContext *c) {
+    MpegMEStruct * mme_struct = &c->mme_struct;
+    MpegEncContext * s = c->mpeg_ctx;
+    av_assert0(s);
+
+    mme_struct->pp_time = s->pp_time;
+    mme_struct->pb_time = s->pb_time;
+    mme_struct->mv_type = s->mv_type;
+    mme_struct->width =   s->width;
+    mme_struct->height =  s->height;
+}
+
 //this function is dedicated to the brain damaged gcc
 int ff_epzs_motion_search(MotionEstContext *c, int *mx_ptr, int *my_ptr,
                           int P[10][2], int src_index, int ref_index,
