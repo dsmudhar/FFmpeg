@@ -19,7 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#include "motion_estimation.h"
+#include "libmotion/motion_estimation.h"
 #include "libavcodec/mathops.h"
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
