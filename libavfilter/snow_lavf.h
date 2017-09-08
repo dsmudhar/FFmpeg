@@ -187,7 +187,7 @@ typedef struct LavfSnowContext {
     //lavf_slice_buffer sb;
     //int memc_only;
     //int no_bitstream;
-    int intra_penalty;
+    //int intra_penalty;
     int motion_est;
     int iterative_dia_size;
     //int sc_threshold;

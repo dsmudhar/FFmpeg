@@ -449,8 +449,8 @@ static int config_input(AVFilterLink *inlink)
         avctx_enc->me_cmp = FF_CMP_SATD;
         avctx_enc->mb_cmp = FF_CMP_SSE;
 
-        av_dict_set(&opts, "intra_penalty", "500", 0);
-        ret = avcodec_open2(avctx_enc, enc, &opts);
+        //av_dict_set(&opts, "intra_penalty", "500", 0);
+        ret = avcodec_open2(avctx_enc, enc, NULL);
         av_dict_free(&opts);
         if (ret < 0)
             goto fail;

@@ -1300,8 +1300,8 @@ static av_always_inline int check_block(LavfSnowContext *s, int mb_x, int mb_y, 
         block->my= p[1];
         block->type &= ~BLOCK_INTRA;
     //}
-
-    rd= get_block_rd(s, mb_x, mb_y, 0, obmc_edged) + s->intra_penalty * !!intra;
+av_assert0(!intra);
+    rd= get_block_rd(s, mb_x, mb_y, 0, obmc_edged);// + s->intra_penalty * !!intra;
 
 //FIXME chroma
     if(rd < *best_rd){
@@ -2161,7 +2161,7 @@ static const AVOption options[] = {
     { "iter", NULL, 0, AV_OPT_TYPE_CONST, { .i64 = FF_ME_ITER }, 0, 0, VE, "motion_est" },*/
     //{ "memc_only",      "Only do ME/MC (I frames -> ref, P frame -> ME+MC).",   OFFSET(memc_only), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
     //{ "no_bitstream",   "Skip final bitstream writeout.",                    OFFSET(no_bitstream), AV_OPT_TYPE_BOOL, { .i64 = 0 }, 0, 1, VE },
-    { "intra_penalty",       "Penalty for intra blocks in block decission",      OFFSET(intra_penalty), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, VE },
+    //{ "intra_penalty",       "Penalty for intra blocks in block decission",      OFFSET(intra_penalty), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, VE },
     { "iterative_dia_size",  "Dia size for the iterative ME",          OFFSET(iterative_dia_size), AV_OPT_TYPE_INT, { .i64 = 0 }, 0, INT_MAX, VE },
     //{ "sc_threshold",   "Scene change threshold",                   OFFSET(sc_threshold), AV_OPT_TYPE_INT, { .i64 = 0 }, INT_MIN, INT_MAX, VE },
     //{ "pred",           "Spatial decomposition type",                                OFFSET(pred), AV_OPT_TYPE_INT, { .i64 = 0 }, DWT_97, DWT_97, VE, "pred" },
