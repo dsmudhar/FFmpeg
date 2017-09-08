@@ -37,7 +37,7 @@
 #include "avcodec.h"
 #include "fft.h"
 #include "mathops.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "put_bits.h"
 #include "audiodsp.h"
 

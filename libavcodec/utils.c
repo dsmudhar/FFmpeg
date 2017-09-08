@@ -46,7 +46,7 @@
 #include "avcodec.h"
 #include "decode.h"
 #include "libavutil/opt.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "mpegvideo.h"
 #include "thread.h"
 #include "frame_thread_encoder.h"

@@ -25,7 +25,7 @@
 #include "libavutil/motion_vector.h"
 
 #include "hpeldsp.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "qpeldsp.h"
 #include "snow_dwt.h"
 

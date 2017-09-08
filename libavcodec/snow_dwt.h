@@ -23,7 +23,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "motion_est.h"
+#include "libmotion/motion_est.h"
 
 typedef int DWTELEM;
 typedef short IDWTELEM;

@@ -22,7 +22,7 @@
 #include "libavutil/cpu.h"
 #include "libavutil/arm/cpu.h"
 #include "libavcodec/avcodec.h"
-#include "libavcodec/me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "libavcodec/mpegvideo.h"
 
 int ff_pix_abs16_armv6(MpegEncContext *s, uint8_t *blk1, uint8_t *blk2,

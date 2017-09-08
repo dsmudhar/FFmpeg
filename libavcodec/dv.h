@@ -29,7 +29,7 @@
 
 #include "avcodec.h"
 #include "dv_profile.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "vlc.h"
 
 typedef struct DVwork_chunk {

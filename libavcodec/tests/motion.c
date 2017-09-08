@@ -28,7 +28,7 @@
 #include <string.h>
 
 #include "config.h"
-#include "libavcodec/me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "libavutil/internal.h"
 #include "libavutil/lfg.h"
 #include "libavutil/mem.h"

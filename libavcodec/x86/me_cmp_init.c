@@ -26,7 +26,7 @@
 #include "libavutil/cpu.h"
 #include "libavutil/x86/asm.h"
 #include "libavutil/x86/cpu.h"
-#include "libavcodec/me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "libavcodec/mpegvideo.h"
 
 int ff_sum_abs_dctelem_mmx(int16_t *block);

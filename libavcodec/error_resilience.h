@@ -22,7 +22,7 @@
 #include <stdint.h>
 
 #include "avcodec.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "thread.h"
 
 ///< current MB is the first after a resync marker

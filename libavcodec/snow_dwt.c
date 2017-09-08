@@ -22,7 +22,7 @@
 #include "libavutil/attributes.h"
 #include "libavutil/avassert.h"
 #include "libavutil/common.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "snow_dwt.h"
 
 int ff_slice_buffer_init(slice_buffer *buf, int line_count,

@@ -24,7 +24,7 @@
 #include "libavutil/common.h"
 
 #include "avcodec.h"
-#include "motion_est.h"
+#include "libmotion/motion_est.h"
 #include "mpegpicture.h"
 #include "mpegutils.h"
 

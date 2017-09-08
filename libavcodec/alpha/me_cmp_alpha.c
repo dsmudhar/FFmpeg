@@ -20,7 +20,7 @@
  */
 
 #include "libavutil/attributes.h"
-#include "libavcodec/me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "asm.h"
 
 int pix_abs16x16_mvi_asm(void *v, uint8_t *pix1, uint8_t *pix2, int line_size, int h);

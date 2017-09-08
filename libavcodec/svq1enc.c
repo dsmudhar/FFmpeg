@@ -28,7 +28,7 @@
 
 #include "avcodec.h"
 #include "hpeldsp.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "mpegvideo.h"
 #include "h263.h"
 #include "internal.h"

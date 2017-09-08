@@ -48,7 +48,7 @@
 #include "h264_ps.h"
 #include "golomb.h"
 #include "mathops.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "mpegutils.h"
 #include "profiles.h"
 #include "rectangle.h"

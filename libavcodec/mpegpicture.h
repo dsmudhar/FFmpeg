@@ -26,7 +26,7 @@
 #include "libavutil/frame.h"
 
 #include "avcodec.h"
-#include "motion_est.h"
+#include "libmotion/motion_est.h"
 #include "thread.h"
 
 #define MAX_PICTURE_COUNT 36

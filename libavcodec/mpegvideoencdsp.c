@@ -25,7 +25,7 @@
 #include "libavutil/attributes.h"
 #include "libavutil/imgutils.h"
 #include "avcodec.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "mpegvideoencdsp.h"
 
 static int try_8x8basis_c(int16_t rem[64], int16_t weight[64],

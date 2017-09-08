@@ -40,7 +40,7 @@
 #include "fdctdsp.h"
 #include "internal.h"
 #include "mathops.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "pixblockdsp.h"
 #include "put_bits.h"
 

@@ -25,7 +25,7 @@
 #include "libavutil/motion_vector.h"
 
 #include "libavcodec/hpeldsp.h"
-#include "libavcodec/me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "libavcodec/qpeldsp.h"
 
 #include "libavcodec/rangecoder.h"

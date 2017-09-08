@@ -29,7 +29,7 @@
 
 #include "libavcodec/avcodec.h"
 #include "libavcodec/mpegvideo.h"
-#include "libavcodec/me_cmp.h"
+#include "libmotion/me_cmp.h"
 
 #if HAVE_ALTIVEC
 

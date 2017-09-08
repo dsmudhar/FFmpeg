@@ -22,7 +22,7 @@
 #include "libavutil/log.h"
 #include "libavutil/opt.h"
 #include "avcodec.h"
-#include "me_cmp.h"
+#include "libmotion/me_cmp.h"
 #include "snow_dwt.h"
 #include "internal.h"
 #include "snow.h"
