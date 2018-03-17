@@ -938,7 +938,7 @@ static int interlaced_search(MpegEncContext *s, int ref_index,
     }
 }
 
-static inline int get_penalty_factor(int lambda, int lambda2, int type){
+inline int avpriv_motion_get_penalty_factor(int lambda, int lambda2, int type){
     switch(type&0xFF){
     default:
     case FF_CMP_SAD:
@@ -982,9 +982,9 @@ void ff_estimate_p_frame_motion(MpegEncContext * s,
     av_assert0(s->linesize == c->stride);
     av_assert0(s->uvlinesize == c->uvstride);
 
-    c->penalty_factor    = get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_cmp);
-    c->sub_penalty_factor= get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_sub_cmp);
-    c->mb_penalty_factor = get_penalty_factor(s->lambda, s->lambda2, c->avctx->mb_cmp);
+    c->penalty_factor    = avpriv_motion_get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_cmp);
+    c->sub_penalty_factor= avpriv_motion_get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_sub_cmp);
+    c->mb_penalty_factor = avpriv_motion_get_penalty_factor(s->lambda, s->lambda2, c->avctx->mb_cmp);
     c->current_mv_penalty= c->mv_penalty[s->f_code] + MAX_DMV;
 
     get_limits(s, 16*mb_x, 16*mb_y);
@@ -1152,7 +1152,7 @@ int ff_pre_estimate_p_frame_motion(MpegEncContext * s,
 
     av_assert0(s->quarter_sample==0 || s->quarter_sample==1);
 
-    c->pre_penalty_factor    = get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_pre_cmp);
+    c->pre_penalty_factor    = avpriv_motion_get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_pre_cmp);
     c->current_mv_penalty= c->mv_penalty[s->f_code] + MAX_DMV;
 
     get_limits(s, 16*mb_x, 16*mb_y);
@@ -1206,9 +1206,9 @@ static int estimate_motion_b(MpegEncContext *s, int mb_x, int mb_y,
     uint8_t * const mv_penalty= c->mv_penalty[f_code] + MAX_DMV;
     int mv_scale;
 
-    c->penalty_factor    = get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_cmp);
-    c->sub_penalty_factor= get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_sub_cmp);
-    c->mb_penalty_factor = get_penalty_factor(s->lambda, s->lambda2, c->avctx->mb_cmp);
+    c->penalty_factor    = avpriv_motion_get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_cmp);
+    c->sub_penalty_factor= avpriv_motion_get_penalty_factor(s->lambda, s->lambda2, c->avctx->me_sub_cmp);
+    c->mb_penalty_factor = avpriv_motion_get_penalty_factor(s->lambda, s->lambda2, c->avctx->mb_cmp);
     c->current_mv_penalty= mv_penalty;
 
     get_limits(s, 16*mb_x, 16*mb_y);
